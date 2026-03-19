@@ -5,6 +5,11 @@
 #include <stdio.h>
 #include <assert.h>
 
+/**
+ * @file tensor.c
+ * @brief 核心张量数据结构与基础函数的实现
+ */
+
 /* ==================== 状态码字符串 ==================== */
 
 const char *tensor_status_to_string(TensorStatus status)
@@ -27,6 +32,8 @@ const char *tensor_status_to_string(TensorStatus status)
         return "Index out of bounds";
     case TENSOR_ERR_DIV_BY_ZERO:
         return "Division by zero";
+    case TENSOR_ERR_SINGULAR_MATRIX:
+        return "Singular matrix";
     case TENSOR_ERR_NOT_IMPLEMENTED:
         return "Not implemented";
     default:
@@ -37,15 +44,16 @@ const char *tensor_status_to_string(TensorStatus status)
 /* ==================== 写时拷贝辅助 ==================== */
 
 /**
- * 确保张量 t 拥有独占的数据副本（若共享则复制）
- * 返回 TENSOR_OK 或错误码
+ * @brief 确保张量 t 拥有独占的数据副本（若共享则复制）
+ * @param t 目标张量
+ * @return TensorStatus
  */
 TensorStatus tensor_make_unique(Tensor *t)
 {
     if (!t)
         return TENSOR_ERR_NULL_PTR;
 
-    // 外部数据，直接假定可写
+    // 外部数据，直接假定可写（用户需保证）
     if (!t->ref_count)
         return TENSOR_OK;
 
@@ -86,7 +94,7 @@ TensorStatus tensor_make_unique(Tensor *t)
 
 Tensor *tensor_create(int ndim, const int *dims)
 {
-    if (ndim < 0)
+    if (ndim < 0 || ndim > TENSOR_MAX_DIM)
         return NULL;
     if (ndim > 0 && !dims)
         return NULL;
@@ -151,7 +159,7 @@ Tensor *tensor_create(int ndim, const int *dims)
 
 Tensor *tensor_wrap(float *data, int ndim, const int *dims, const int *strides)
 {
-    if (!data || ndim < 0)
+    if (!data || ndim < 0 || ndim > TENSOR_MAX_DIM)
         return NULL;
     if (ndim > 0 && !dims)
         return NULL;
@@ -256,7 +264,7 @@ Tensor *tensor_clone(const Tensor *src)
 
 Tensor *tensor_view(const Tensor *src, int ndim, const int *dims, const int *strides)
 {
-    if (!src || ndim < 0)
+    if (!src || ndim < 0 || ndim > TENSOR_MAX_DIM)
         return NULL;
     if (ndim > 0 && !dims)
         return NULL;
@@ -370,8 +378,8 @@ TensorStatus tensor_copy(Tensor *dst, const Tensor *src)
     int coords[TENSOR_MAX_DIM] = {0};
     while (1)
     {
-        size_t src_off = util_offset_from_coords(coords, src_strides, ndim);
-        size_t dst_off = util_offset_from_coords(coords, dst_strides, ndim);
+        ptrdiff_t src_off = util_offset_from_coords(coords, src_strides, ndim);
+        ptrdiff_t dst_off = util_offset_from_coords(coords, dst_strides, ndim);
         dst->data[dst_off] = src->data[src_off];
 
         if (util_increment_coords(coords, src->dims, ndim))
@@ -390,8 +398,7 @@ TensorStatus tensor_contiguous(Tensor *t)
     // 对于外部数据（无引用计数），不能原地修改为连续，因为无法释放原数据
     if (!t->ref_count)
     {
-        // 可以尝试分配新数据并替换，但原外部数据会丢失，调用者需自行管理
-        // 这里保守返回错误，要求用户自己处理或使用 tensor_clone
+        // 返回错误，提示用户需自行处理
         return TENSOR_ERR_UNSUPPORTED;
     }
 
@@ -488,11 +495,11 @@ int tensor_dim_size(const Tensor *t, int axis)
     return t->dims[ax];
 }
 
-size_t tensor_offset(const Tensor *t, const int *indices)
+ptrdiff_t tensor_offset(const Tensor *t, const int *indices)
 {
     if (!t || !indices)
-        return SIZE_MAX;
-    size_t offset = 0;
+        return -1;
+    ptrdiff_t off = 0;
     if (t->strides)
     {
         for (int i = 0; i < t->ndim; ++i)
@@ -501,19 +508,19 @@ size_t tensor_offset(const Tensor *t, const int *indices)
             if (idx < 0)
                 idx += t->dims[i];
             if (idx < 0 || idx >= t->dims[i])
-                return SIZE_MAX;
-            offset += idx * t->strides[i];
+                return -1;
+            off += (ptrdiff_t)idx * t->strides[i];
         }
     }
     else
     {
         // 连续存储，按行主序计算扁平索引
         size_t mul = 1;
-        offset = indices[t->ndim - 1];
-        if (offset < 0)
-            offset += t->dims[t->ndim - 1];
-        if (offset < 0 || offset >= t->dims[t->ndim - 1])
-            return SIZE_MAX;
+        off = indices[t->ndim - 1];
+        if (off < 0)
+            off += t->dims[t->ndim - 1];
+        if (off < 0 || off >= t->dims[t->ndim - 1])
+            return -1;
         for (int i = t->ndim - 2; i >= 0; --i)
         {
             mul *= t->dims[i + 1];
@@ -521,9 +528,9 @@ size_t tensor_offset(const Tensor *t, const int *indices)
             if (idx < 0)
                 idx += t->dims[i];
             if (idx < 0 || idx >= t->dims[i])
-                return SIZE_MAX;
-            offset += idx * mul;
+                return -1;
+            off += (ptrdiff_t)idx * mul;
         }
     }
-    return offset;
+    return off;
 }

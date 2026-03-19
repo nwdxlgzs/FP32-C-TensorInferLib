@@ -6,6 +6,40 @@
 #include <stdlib.h>
 #include <float.h>
 
+/**
+ * @file nn_ops.c
+ * @brief 神经网络层操作的实现：卷积、池化、归一化、激活函数等
+ *
+ * 包含一维/二维/三维卷积及转置卷积、各类池化、批归一化/层归一化/实例归一化/组归一化/LRN、
+ * 多种激活函数、全连接层、dropout、softmax/log_softmax、上采样（最近邻/线性/三次插值）、
+ * 最大反池化、自适应平均池化。
+ */
+
+/* ==================== 内部辅助函数 ==================== */
+
+/**
+ * @brief 反射坐标（用于三次插值的边界处理）
+ * @param coord 原始坐标
+ * @param dim   维度大小
+ * @return 反射后的有效坐标
+ */
+static int reflect_coord(int coord, int dim)
+{
+    if (dim <= 1)
+        return 0;
+    int period = 2 * dim - 2;
+    coord %= period;
+    if (coord < 0)
+        coord += period;
+    return (coord < dim) ? coord : period - coord;
+}
+
+/**
+ * @brief Catmull-Rom 插值（三次插值核心）
+ * @param p0, p1, p2, p3 四个控制点
+ * @param t 插值位置 [0,1]
+ * @return 插值结果
+ */
 static float catmull_rom(float p0, float p1, float p2, float p3, float t)
 {
     return 0.5f * ((-p0 + 3 * p1 - 3 * p2 + p3) * t * t * t +
@@ -13,6 +47,8 @@ static float catmull_rom(float p0, float p1, float p2, float p3, float t)
                    (-p0 + p2) * t +
                    2 * p1);
 }
+
+/* ---------- 卷积输出形状计算 ---------- */
 
 static void conv1d_output_shape(int in_len, int kernel_len,
                                 int pad, int stride, int dilation,
@@ -49,6 +85,9 @@ static void conv3d_output_shape(int in_d, int in_h, int in_w,
     *out_h = (in_h + 2 * pad_h - effective_kernel_h) / stride_h + 1;
     *out_w = (in_w + 2 * pad_w - effective_kernel_w) / stride_w + 1;
 }
+
+/* ---------- 转置卷积输出形状计算 ---------- */
+
 static void conv_transpose1d_output_shape(int in_len, int kernel_len,
                                           int pad, int stride, int dilation,
                                           int *out_len)
@@ -78,8 +117,18 @@ static void conv_transpose3d_output_shape(int in_d, int in_h, int in_w,
     *out_h = (in_h - 1) * stride_h + (kernel_h - 1) * dilation_h + 1 - 2 * pad_h;
     *out_w = (in_w - 1) * stride_w + (kernel_w - 1) * dilation_w + 1 - 2 * pad_w;
 }
-/* ---------- 卷积 ---------- */
 
+/* ==================== 卷积层 ==================== */
+
+/**
+ * @brief 一维卷积
+ * @param input  输入张量 [N, C, L]
+ * @param weight 卷积核 [out_channels, in_channels/groups, kL]
+ * @param bias   偏置 [out_channels] 或标量，可为 NULL
+ * @param params 卷积参数（pad[0], stride[0], dilation[0], groups）
+ * @param output 输出张量 [N, out_channels, out_len]
+ * @return TensorStatus
+ */
 TensorStatus tensor_conv1d(const Tensor *input, const Tensor *weight,
                            const Tensor *bias, ConvParams params,
                            Tensor *output)
@@ -109,7 +158,8 @@ TensorStatus tensor_conv1d(const Tensor *input, const Tensor *weight,
 
     int out_len;
     conv1d_output_shape(L, kL, params.pad[0], params.stride[0], params.dilation[0], &out_len);
-
+    if (out_len <= 0)
+        return TENSOR_ERR_INVALID_PARAM;
     if (output->ndim != 3 ||
         output->dims[0] != N ||
         output->dims[1] != out_channels ||
@@ -175,6 +225,15 @@ TensorStatus tensor_conv1d(const Tensor *input, const Tensor *weight,
     return TENSOR_OK;
 }
 
+/**
+ * @brief 二维卷积
+ * @param input  输入张量 [N, C, H, W]
+ * @param weight 卷积核 [out_channels, in_channels/groups, kH, kW]
+ * @param bias   偏置 [out_channels] 或标量，可为 NULL
+ * @param params 卷积参数（pad[0..1], stride[0..1], dilation[0..1], groups）
+ * @param output 输出张量 [N, out_channels, out_h, out_w]
+ * @return TensorStatus
+ */
 TensorStatus tensor_conv2d(const Tensor *input, const Tensor *weight,
                            const Tensor *bias, ConvParams params,
                            Tensor *output)
@@ -212,6 +271,8 @@ TensorStatus tensor_conv2d(const Tensor *input, const Tensor *weight,
                         params.stride[0], params.stride[1],
                         params.dilation[0], params.dilation[1],
                         &out_h, &out_w);
+    if (out_h <= 0 || out_w <= 0)
+        return TENSOR_ERR_INVALID_PARAM;
 
     if (output->ndim != 4 ||
         output->dims[0] != N ||
@@ -292,6 +353,15 @@ TensorStatus tensor_conv2d(const Tensor *input, const Tensor *weight,
     return TENSOR_OK;
 }
 
+/**
+ * @brief 三维卷积
+ * @param input  输入张量 [N, C, D, H, W]
+ * @param weight 卷积核 [out_channels, in_channels/groups, kD, kH, kW]
+ * @param bias   偏置 [out_channels] 或标量，可为 NULL
+ * @param params 卷积参数（pad[0..2], stride[0..2], dilation[0..2], groups）
+ * @param output 输出张量 [N, out_channels, out_d, out_h, out_w]
+ * @return TensorStatus
+ */
 TensorStatus tensor_conv3d(const Tensor *input, const Tensor *weight,
                            const Tensor *bias, ConvParams params,
                            Tensor *output)
@@ -332,6 +402,8 @@ TensorStatus tensor_conv3d(const Tensor *input, const Tensor *weight,
                         params.stride[0], params.stride[1], params.stride[2],
                         params.dilation[0], params.dilation[1], params.dilation[2],
                         &out_d, &out_h, &out_w);
+    if (out_d <= 0 || out_h <= 0 || out_w <= 0)
+        return TENSOR_ERR_INVALID_PARAM;
 
     if (output->ndim != 5 ||
         output->dims[0] != N ||
@@ -426,6 +498,17 @@ TensorStatus tensor_conv3d(const Tensor *input, const Tensor *weight,
     return TENSOR_OK;
 }
 
+/* ==================== 转置卷积 ==================== */
+
+/**
+ * @brief 一维转置卷积
+ * @param input  输入张量 [N, C_in, L]
+ * @param weight 卷积核 [out_channels, in_channels/groups, kL] （注意：out_channels 实际是权重的输出通道，应等于输入的通道数）
+ * @param bias   偏置 [in_channels] 或标量，可为 NULL
+ * @param params 卷积参数
+ * @param output 输出张量 [N, in_channels, out_len]
+ * @return TensorStatus
+ */
 TensorStatus tensor_conv_transpose1d(const Tensor *input, const Tensor *weight,
                                      const Tensor *bias, ConvParams params,
                                      Tensor *output)
@@ -473,10 +556,8 @@ TensorStatus tensor_conv_transpose1d(const Tensor *input, const Tensor *weight,
     util_get_effective_strides(weight, w_strides);
     util_get_effective_strides(output, out_strides);
 
-    // 初始化输出为0（包括后续偏置）
     util_clear_tensor(output);
 
-    // 遍历 batch、组、输入通道（权重的输入通道）、输出通道（权重的输出通道）、输入位置、核位置
     for (int n = 0; n < N; n++)
     {
         for (int g = 0; g < groups; g++)
@@ -513,7 +594,6 @@ TensorStatus tensor_conv_transpose1d(const Tensor *input, const Tensor *weight,
         }
     }
 
-    // 添加偏置
     if (bias)
     {
         if (bias->ndim == 1 && (int)bias->size == in_channels)
@@ -547,6 +627,9 @@ TensorStatus tensor_conv_transpose1d(const Tensor *input, const Tensor *weight,
     return TENSOR_OK;
 }
 
+/**
+ * @brief 二维转置卷积
+ */
 TensorStatus tensor_conv_transpose2d(const Tensor *input, const Tensor *weight,
                                      const Tensor *bias, ConvParams params,
                                      Tensor *output)
@@ -684,6 +767,9 @@ TensorStatus tensor_conv_transpose2d(const Tensor *input, const Tensor *weight,
     return TENSOR_OK;
 }
 
+/**
+ * @brief 三维转置卷积
+ */
 TensorStatus tensor_conv_transpose3d(const Tensor *input, const Tensor *weight,
                                      const Tensor *bias, ConvParams params,
                                      Tensor *output)
@@ -839,8 +925,11 @@ TensorStatus tensor_conv_transpose3d(const Tensor *input, const Tensor *weight,
     return TENSOR_OK;
 }
 
-/* ---------- 池化 ---------- */
+/* ==================== 池化层（通用实现） ==================== */
 
+/**
+ * @brief 一维池化通用实现
+ */
 static TensorStatus pool1d_general(const Tensor *input, PoolType type,
                                    PoolParams params, Tensor *output)
 {
@@ -863,6 +952,8 @@ static TensorStatus pool1d_general(const Tensor *input, PoolType type,
         out_len = (int)ceil((L + 2 * padL - kL) / (float)strideL) + 1;
     else
         out_len = (L + 2 * padL - kL) / strideL + 1;
+    if (out_len <= 0)
+        return TENSOR_ERR_INVALID_PARAM;
 
     if (output->ndim != 3 ||
         output->dims[0] != N ||
@@ -947,6 +1038,9 @@ static TensorStatus pool1d_general(const Tensor *input, PoolType type,
     return TENSOR_OK;
 }
 
+/**
+ * @brief 二维池化通用实现
+ */
 static TensorStatus pool2d_general(const Tensor *input, PoolType type,
                                    PoolParams params, Tensor *output)
 {
@@ -979,6 +1073,8 @@ static TensorStatus pool2d_general(const Tensor *input, PoolType type,
         out_h = (H + 2 * padH - kH) / strideH + 1;
         out_w = (W + 2 * padW - kW) / strideW + 1;
     }
+    if (out_h <= 0 || out_w <= 0)
+        return TENSOR_ERR_INVALID_PARAM;
 
     if (output->ndim != 4 ||
         output->dims[0] != N ||
@@ -1084,10 +1180,12 @@ static TensorStatus pool2d_general(const Tensor *input, PoolType type,
     return TENSOR_OK;
 }
 
+/**
+ * @brief 三维池化通用实现
+ */
 static TensorStatus pool3d_general(const Tensor *input, PoolType type,
                                    PoolParams params, Tensor *output)
 {
-    // 3D 池化，类似扩展
     if (!input || !output)
         return TENSOR_ERR_NULL_PTR;
     if (input->ndim != 5)
@@ -1123,6 +1221,8 @@ static TensorStatus pool3d_general(const Tensor *input, PoolType type,
         out_h = (H + 2 * padH - kH) / strideH + 1;
         out_w = (W + 2 * padW - kW) / strideW + 1;
     }
+    if (out_d <= 0 || out_h <= 0 || out_w <= 0)
+        return TENSOR_ERR_INVALID_PARAM;
 
     if (output->ndim != 5 ||
         output->dims[0] != N ||
@@ -1249,6 +1349,8 @@ static TensorStatus pool3d_general(const Tensor *input, PoolType type,
     return TENSOR_OK;
 }
 
+/* ---------- 池化 API ---------- */
+
 TensorStatus tensor_pool1d(const Tensor *input, PoolType type,
                            PoolParams params, Tensor *output)
 {
@@ -1267,6 +1369,9 @@ TensorStatus tensor_pool3d(const Tensor *input, PoolType type,
     return pool3d_general(input, type, params, output);
 }
 
+/**
+ * @brief 二维全局平均池化
+ */
 TensorStatus tensor_global_avg_pool2d(const Tensor *input, Tensor *output)
 {
     if (!input || !output)
@@ -1317,6 +1422,9 @@ TensorStatus tensor_global_avg_pool2d(const Tensor *input, Tensor *output)
     return TENSOR_OK;
 }
 
+/**
+ * @brief 二维全局最大池化
+ */
 TensorStatus tensor_global_max_pool2d(const Tensor *input, Tensor *output)
 {
     if (!input || !output)
@@ -1369,8 +1477,11 @@ TensorStatus tensor_global_max_pool2d(const Tensor *input, Tensor *output)
     return TENSOR_OK;
 }
 
-/* ---------- 归一化 ---------- */
+/* ==================== 归一化层 ==================== */
 
+/**
+ * @brief 批归一化（推理模式）
+ */
 TensorStatus tensor_batchnorm(const Tensor *x, const Tensor *mean,
                               const Tensor *var, const Tensor *scale,
                               const Tensor *bias, float epsilon,
@@ -1435,6 +1546,9 @@ TensorStatus tensor_batchnorm(const Tensor *x, const Tensor *mean,
     return TENSOR_OK;
 }
 
+/**
+ * @brief 层归一化
+ */
 TensorStatus tensor_layernorm(const Tensor *x, const Tensor *scale,
                               const Tensor *bias, float epsilon,
                               Tensor *y)
@@ -1520,6 +1634,9 @@ TensorStatus tensor_layernorm(const Tensor *x, const Tensor *scale,
     return TENSOR_OK;
 }
 
+/**
+ * @brief 实例归一化
+ */
 TensorStatus tensor_instancenorm(const Tensor *x, const Tensor *scale,
                                  const Tensor *bias, float epsilon,
                                  Tensor *y)
@@ -1620,6 +1737,9 @@ TensorStatus tensor_instancenorm(const Tensor *x, const Tensor *scale,
     return TENSOR_OK;
 }
 
+/**
+ * @brief 组归一化
+ */
 TensorStatus tensor_groupnorm(const Tensor *x, const Tensor *scale,
                               const Tensor *bias, int num_groups,
                               float epsilon, Tensor *y)
@@ -1670,7 +1790,6 @@ TensorStatus tensor_groupnorm(const Tensor *x, const Tensor *scale,
         for (int g = 0; g < num_groups; g++)
         {
             double sum = 0.0;
-            // 遍历组内所有通道和空间
             for (int gc = 0; gc < group_size; gc++)
             {
                 int c = g * group_size + gc;
@@ -1734,6 +1853,9 @@ TensorStatus tensor_groupnorm(const Tensor *x, const Tensor *scale,
     return TENSOR_OK;
 }
 
+/**
+ * @brief 本地响应归一化 (LRN)
+ */
 TensorStatus tensor_lrn(const Tensor *x, int size, float alpha,
                         float beta, float bias, Tensor *y)
 {
@@ -1805,23 +1927,33 @@ TensorStatus tensor_lrn(const Tensor *x, int size, float alpha,
     return TENSOR_OK;
 }
 
-/* ---------- 激活函数 ---------- */
+/* ==================== 激活函数 ==================== */
 
+/* 基础激活函数（无参） */
 static float relu_op(float x) { return x > 0 ? x : 0; }
 static float leaky_relu_op(float x, float alpha) { return x > 0 ? x : alpha * x; }
 static float elu_op(float x, float alpha) { return x > 0 ? x : alpha * (expf(x) - 1); }
 static float selu_op(float x, float alpha, float scale) { return scale * (x > 0 ? x : alpha * (expf(x) - 1)); }
+// static float gelu_op(float x)
+// {
+//     float c = 0.7978845608028654f; // sqrt(2/pi)
+//     return 0.5f * x * (1.0f + tanhf(c * (x + 0.044715f * x * x * x)));
+// }
 static float gelu_op(float x)
 {
-    // 近似公式：0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-    float c = 0.7978845608028654f; // sqrt(2/pi)
-    return 0.5f * x * (1.0f + tanhf(c * (x + 0.044715f * x * x * x)));
+    return 0.5f * x * (1.0f + erff(x / 1.41421356237f));
 }
 static float swish_op(float x) { return x / (1.0f + expf(-x)); }
+// static float mish_op(float x)
+// {
+//     float sp = logf(1.0f + expf(x));
+//     return x * tanhf(sp);
+// }
 static float mish_op(float x)
 {
-    float sp = logf(1.0f + expf(x));
-    return x * tanhf(sp);
+    double xd = x;
+    double sp = log1p(exp(xd)); // log1p 比 log(1+exp) 更精确
+    return (float)(xd * tanh(sp));
 }
 static float softplus_op(float x) { return logf(1.0f + expf(x)); }
 static float softsign_op(float x) { return x / (1.0f + fabsf(x)); }
@@ -1843,6 +1975,9 @@ static float hardsigmoid_op(float x)
 }
 static float prelu_op(float x, float alpha) { return x > 0 ? x : alpha * x; }
 
+/**
+ * @brief 一元激活函数通用实现（无参）
+ */
 static TensorStatus unary_activation(const Tensor *x, Tensor *out, float (*op)(float))
 {
     if (!x || !out)
@@ -1884,6 +2019,42 @@ TensorStatus tensor_relu(const Tensor *x, Tensor *out)
     return unary_activation(x, out, relu_op);
 }
 
+TensorStatus tensor_gelu(const Tensor *x, Tensor *out)
+{
+    return unary_activation(x, out, gelu_op);
+}
+
+TensorStatus tensor_swish(const Tensor *x, Tensor *out)
+{
+    return unary_activation(x, out, swish_op);
+}
+
+TensorStatus tensor_mish(const Tensor *x, Tensor *out)
+{
+    return unary_activation(x, out, mish_op);
+}
+
+TensorStatus tensor_softplus(const Tensor *x, Tensor *out)
+{
+    return unary_activation(x, out, softplus_op);
+}
+
+TensorStatus tensor_softsign(const Tensor *x, Tensor *out)
+{
+    return unary_activation(x, out, softsign_op);
+}
+
+TensorStatus tensor_hardswish(const Tensor *x, Tensor *out)
+{
+    return unary_activation(x, out, hardswish_op);
+}
+
+TensorStatus tensor_hardsigmoid(const Tensor *x, Tensor *out)
+{
+    return unary_activation(x, out, hardsigmoid_op);
+}
+
+/* 带参数的激活函数 */
 TensorStatus tensor_leaky_relu(const Tensor *x, float alpha, Tensor *out)
 {
     if (!x || !out)
@@ -1992,41 +2163,6 @@ TensorStatus tensor_selu(const Tensor *x, float alpha, float scale, Tensor *out)
     return TENSOR_OK;
 }
 
-TensorStatus tensor_gelu(const Tensor *x, Tensor *out)
-{
-    return unary_activation(x, out, gelu_op);
-}
-
-TensorStatus tensor_swish(const Tensor *x, Tensor *out)
-{
-    return unary_activation(x, out, swish_op);
-}
-
-TensorStatus tensor_mish(const Tensor *x, Tensor *out)
-{
-    return unary_activation(x, out, mish_op);
-}
-
-TensorStatus tensor_softplus(const Tensor *x, Tensor *out)
-{
-    return unary_activation(x, out, softplus_op);
-}
-
-TensorStatus tensor_softsign(const Tensor *x, Tensor *out)
-{
-    return unary_activation(x, out, softsign_op);
-}
-
-TensorStatus tensor_hardswish(const Tensor *x, Tensor *out)
-{
-    return unary_activation(x, out, hardswish_op);
-}
-
-TensorStatus tensor_hardsigmoid(const Tensor *x, Tensor *out)
-{
-    return unary_activation(x, out, hardsigmoid_op);
-}
-
 TensorStatus tensor_prelu(const Tensor *x, const Tensor *alpha, Tensor *out)
 {
     if (!x || !alpha || !out)
@@ -2036,7 +2172,6 @@ TensorStatus tensor_prelu(const Tensor *x, const Tensor *alpha, Tensor *out)
     for (int i = 0; i < x->ndim; i++)
         if (x->dims[i] != out->dims[i])
             return TENSOR_ERR_SHAPE_MISMATCH;
-    // alpha 形状应为 (C,) 或可广播
     int C = x->dims[1]; // 假设通道在第二维
     if (alpha->ndim != 1 || (int)alpha->size != C)
         return TENSOR_ERR_SHAPE_MISMATCH;
@@ -2070,8 +2205,11 @@ TensorStatus tensor_prelu(const Tensor *x, const Tensor *alpha, Tensor *out)
     return TENSOR_OK;
 }
 
-/* ---------- 其他层 ---------- */
+/* ==================== 其他层 ==================== */
 
+/**
+ * @brief 全连接层
+ */
 TensorStatus tensor_linear(const Tensor *input, const Tensor *weight,
                            const Tensor *bias, Tensor *output)
 {
@@ -2107,7 +2245,6 @@ TensorStatus tensor_linear(const Tensor *input, const Tensor *weight,
     util_get_effective_strides(weight, w_strides);
     util_get_effective_strides(output, out_strides);
 
-    // 计算 batch 大小（除最后一维外的所有维度）
     int outer_ndim = out_ndim - 1;
     int outer_dims[TENSOR_MAX_DIM];
     int outer_strides_in[TENSOR_MAX_DIM];
@@ -2150,6 +2287,9 @@ TensorStatus tensor_linear(const Tensor *input, const Tensor *weight,
     return TENSOR_OK;
 }
 
+/**
+ * @brief Dropout 层
+ */
 TensorStatus tensor_dropout(const Tensor *x, float p, int training, Tensor *out)
 {
     if (!x || !out)
@@ -2164,11 +2304,9 @@ TensorStatus tensor_dropout(const Tensor *x, float p, int training, Tensor *out)
 
     if (!training)
     {
-        // 推理模式：直接复制
         return tensor_copy(out, x);
     }
 
-    // 训练模式
     TensorStatus status = tensor_make_unique(out);
     if (status != TENSOR_OK)
         return status;
@@ -2182,8 +2320,8 @@ TensorStatus tensor_dropout(const Tensor *x, float p, int training, Tensor *out)
     int coords[TENSOR_MAX_DIM] = {0};
     while (1)
     {
-        size_t x_off = util_offset_from_coords(coords, x_strides, ndim);
-        size_t out_off = util_offset_from_coords(coords, out_strides, ndim);
+        ptrdiff_t x_off = util_offset_from_coords(coords, x_strides, ndim);
+        ptrdiff_t out_off = util_offset_from_coords(coords, out_strides, ndim);
         float r = (float)rand() / RAND_MAX;
         if (r < p)
             out->data[out_off] = 0.0f;
@@ -2196,6 +2334,9 @@ TensorStatus tensor_dropout(const Tensor *x, float p, int training, Tensor *out)
     return TENSOR_OK;
 }
 
+/**
+ * @brief Softmax 函数
+ */
 TensorStatus tensor_softmax(const Tensor *x, int axis, Tensor *out)
 {
     if (!x || !out)
@@ -2259,7 +2400,6 @@ TensorStatus tensor_softmax(const Tensor *x, int axis, Tensor *out)
 
         if (max_val == -INFINITY)
         {
-            // 所有输入均为 -inf，输出均匀分布（避免 NaN）
             float uniform = 1.0f / inner_size;
             for (int j = 0; j < inner_size; j++)
             {
@@ -2289,6 +2429,9 @@ TensorStatus tensor_softmax(const Tensor *x, int axis, Tensor *out)
     return TENSOR_OK;
 }
 
+/**
+ * @brief LogSoftmax 函数
+ */
 TensorStatus tensor_log_softmax(const Tensor *x, int axis, Tensor *out)
 {
     if (!x || !out)
@@ -2352,7 +2495,6 @@ TensorStatus tensor_log_softmax(const Tensor *x, int axis, Tensor *out)
 
         if (max_val == -INFINITY)
         {
-            // 所有输入为 -inf，输出 -log(inner_size)
             float log_uniform = -logf((float)inner_size);
             for (int j = 0; j < inner_size; j++)
             {
@@ -2378,10 +2520,15 @@ TensorStatus tensor_log_softmax(const Tensor *x, int axis, Tensor *out)
         }
         if (util_increment_coords(outer_coords, outer_dims, outer_ndim))
             break;
-        }
+    }
     return TENSOR_OK;
 }
 
+/* ==================== 上采样 ==================== */
+
+/**
+ * @brief 2D 上采样
+ */
 TensorStatus tensor_upsample2d(const Tensor *x, int scale_h, int scale_w,
                                InterpMode mode, int align_corners, Tensor *out)
 {
@@ -2454,7 +2601,6 @@ TensorStatus tensor_upsample2d(const Tensor *x, int scale_h, int scale_w,
                     float yf;
                     if (align_corners)
                     {
-                        // 处理边界，避免浮点误差导致 yf < 0 或 yf > H-1
                         if (oh == 0)
                             yf = 0.0f;
                         else if (oh == out_h - 1)
@@ -2471,7 +2617,6 @@ TensorStatus tensor_upsample2d(const Tensor *x, int scale_h, int scale_w,
                     int y1 = y0 + 1;
                     float dy = yf - y0;
 
-                    // 垂直方向边界处理
                     if (y0 < 0)
                     {
                         y0 = 0;
@@ -2480,8 +2625,6 @@ TensorStatus tensor_upsample2d(const Tensor *x, int scale_h, int scale_w,
                     }
                     else if (y1 >= H)
                     {
-                        // 当 y1 超出时，y0 可能等于 H-1，或者 y0 = H-2 但 yf 略小于 H-1
-                        // 统一设为 y0 = H-1, dy = 0 确保只使用最后一行
                         y0 = H - 1;
                         y1 = H - 1;
                         dy = 0.0f;
@@ -2508,7 +2651,6 @@ TensorStatus tensor_upsample2d(const Tensor *x, int scale_h, int scale_w,
                         int x1 = x0 + 1;
                         float dx = xf - x0;
 
-                        // 水平方向边界处理
                         if (x0 < 0)
                         {
                             x0 = 0;
@@ -2522,7 +2664,6 @@ TensorStatus tensor_upsample2d(const Tensor *x, int scale_h, int scale_w,
                             dx = 0.0f;
                         }
 
-                        // 获取四个像素值
                         size_t off00 = n * x_strides[0] + c * x_strides[1] + y0 * x_strides[2] + x0 * x_strides[3];
                         size_t off01 = n * x_strides[0] + c * x_strides[1] + y0 * x_strides[2] + x1 * x_strides[3];
                         size_t off10 = n * x_strides[0] + c * x_strides[1] + y1 * x_strides[2] + x0 * x_strides[3];
@@ -2533,7 +2674,6 @@ TensorStatus tensor_upsample2d(const Tensor *x, int scale_h, int scale_w,
                         float v10 = x->data[off10];
                         float v11 = x->data[off11];
 
-                        // 双线性插值
                         float v0 = v00 * (1 - dx) + v01 * dx;
                         float v1 = v10 * (1 - dx) + v11 * dx;
                         float val = v0 * (1 - dy) + v1 * dy;
@@ -2569,11 +2709,10 @@ TensorStatus tensor_upsample2d(const Tensor *x, int scale_h, int scale_w,
                     int y3 = y0 + 3;
                     float dy = yf - floorf(yf);
 
-                    // 边界 clamp
-                    y0 = (y0 < 0) ? 0 : (y0 >= H ? H - 1 : y0);
-                    y1 = (y1 < 0) ? 0 : (y1 >= H ? H - 1 : y1);
-                    y2 = (y2 < 0) ? 0 : (y2 >= H ? H - 1 : y2);
-                    y3 = (y3 < 0) ? 0 : (y3 >= H ? H - 1 : y3);
+                    y0 = reflect_coord(y0, H);
+                    y1 = reflect_coord(y1, H);
+                    y2 = reflect_coord(y2, H);
+                    y3 = reflect_coord(y3, H);
 
                     for (int ow = 0; ow < out_w; ow++)
                     {
@@ -2584,12 +2723,11 @@ TensorStatus tensor_upsample2d(const Tensor *x, int scale_h, int scale_w,
                         int x3 = x0 + 3;
                         float dx = xf - floorf(xf);
 
-                        x0 = (x0 < 0) ? 0 : (x0 >= W ? W - 1 : x0);
-                        x1 = (x1 < 0) ? 0 : (x1 >= W ? W - 1 : x1);
-                        x2 = (x2 < 0) ? 0 : (x2 >= W ? W - 1 : x2);
-                        x3 = (x3 < 0) ? 0 : (x3 >= W ? W - 1 : x3);
+                        x0 = reflect_coord(x0, W);
+                        x1 = reflect_coord(x1, W);
+                        x2 = reflect_coord(x2, W);
+                        x3 = reflect_coord(x3, W);
 
-                        // 获取 4x4 邻域
                         float p[4][4];
                         int y_idx[4] = {y0, y1, y2, y3};
                         int x_idx[4] = {x0, x1, x2, x3};
@@ -2603,12 +2741,10 @@ TensorStatus tensor_upsample2d(const Tensor *x, int scale_h, int scale_w,
                             }
                         }
 
-                        // 水平插值
                         float row_val[4];
                         for (int i = 0; i < 4; i++)
                             row_val[i] = catmull_rom(p[i][0], p[i][1], p[i][2], p[i][3], dx);
 
-                        // 垂直插值
                         float val = catmull_rom(row_val[0], row_val[1], row_val[2], row_val[3], dy);
 
                         size_t out_off = n * out_strides[0] + c * out_strides[1] +
@@ -2620,4 +2756,1096 @@ TensorStatus tensor_upsample2d(const Tensor *x, int scale_h, int scale_w,
         }
         return TENSOR_OK;
     }
+    return TENSOR_ERR_INVALID_PARAM; // 未知模式
+}
+
+/* ==================== 最大反池化 ==================== */
+
+/**
+ * @brief 2D 最大反池化
+ */
+TensorStatus tensor_max_unpool2d(const Tensor *x, const Tensor *indices,
+                                 const int *output_size, Tensor *out)
+{
+    if (!x || !indices || !out)
+        return TENSOR_ERR_NULL_PTR;
+    if (x->ndim != 4 || indices->ndim != 4)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+    if (output_size == NULL)
+        return TENSOR_ERR_INVALID_PARAM;
+
+    int N = x->dims[0];
+    int C = x->dims[1];
+    int H_in = x->dims[2];
+    int W_in = x->dims[3];
+
+    for (int i = 0; i < 4; ++i)
+        if (indices->dims[i] != x->dims[i])
+            return TENSOR_ERR_SHAPE_MISMATCH;
+
+    int out_h = output_size[0];
+    int out_w = output_size[1];
+    if (out_h <= 0 || out_w <= 0)
+        return TENSOR_ERR_INVALID_PARAM;
+
+    if (out->ndim != 4 || out->dims[0] != N || out->dims[1] != C ||
+        out->dims[2] != out_h || out->dims[3] != out_w)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    TensorStatus status = tensor_make_unique(out);
+    if (status != TENSOR_OK)
+        return status;
+
+    int x_strides[4], idx_strides[4], out_strides[4];
+    util_get_effective_strides(x, x_strides);
+    util_get_effective_strides(indices, idx_strides);
+    util_get_effective_strides(out, out_strides);
+
+    util_clear_tensor(out);
+
+    int coords[4] = {0};
+    while (1)
+    {
+        size_t x_off = 0, idx_off = 0;
+        for (int i = 0; i < 4; ++i)
+        {
+            x_off += coords[i] * x_strides[i];
+            idx_off += coords[i] * idx_strides[i];
+        }
+        float val = x->data[x_off];
+        float idx_float = indices->data[idx_off];
+        TensorStatus st;
+        int idx_val = tensor_float_to_index(idx_float, out_h * out_w, &st);
+        if (st != TENSOR_OK)
+            return st;
+        int out_h_idx = idx_val / out_w;
+        int out_w_idx = idx_val % out_w;
+        if (out_h_idx < 0 || out_h_idx >= out_h || out_w_idx < 0 || out_w_idx >= out_w)
+            return TENSOR_ERR_INDEX_OUT_OF_BOUNDS;
+
+        int out_coords[4] = {coords[0], coords[1], out_h_idx, out_w_idx};
+        ptrdiff_t out_off = util_offset_from_coords(out_coords, out_strides, 4);
+        out->data[out_off] += val;
+
+        if (util_increment_coords(coords, x->dims, 4))
+            break;
+    }
+
+    return TENSOR_OK;
+}
+
+/* ==================== 自适应池化 ==================== */
+
+/**
+ * @brief 2D 自适应平均池化
+ */
+TensorStatus tensor_adaptive_avg_pool2d(const Tensor *x, const int *output_size, Tensor *out)
+{
+    if (!x || !out)
+        return TENSOR_ERR_NULL_PTR;
+    if (x->ndim != 4)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+    if (output_size == NULL)
+        return TENSOR_ERR_INVALID_PARAM;
+
+    int N = x->dims[0];
+    int C = x->dims[1];
+    int H = x->dims[2];
+    int W = x->dims[3];
+    int out_h = output_size[0];
+    int out_w = output_size[1];
+
+    if (out_h <= 0 || out_w <= 0)
+        return TENSOR_ERR_INVALID_PARAM;
+    if (out_h > H || out_w > W)
+        return TENSOR_ERR_INVALID_PARAM;
+
+    if (out->ndim != 4 || out->dims[0] != N || out->dims[1] != C ||
+        out->dims[2] != out_h || out->dims[3] != out_w)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    TensorStatus status = tensor_make_unique(out);
+    if (status != TENSOR_OK)
+        return status;
+
+    int x_strides[4], out_strides[4];
+    util_get_effective_strides(x, x_strides);
+    util_get_effective_strides(out, out_strides);
+
+    int *h_start = (int *)malloc(out_h * sizeof(int));
+    int *h_end = (int *)malloc(out_h * sizeof(int));
+    int *w_start = (int *)malloc(out_w * sizeof(int));
+    int *w_end = (int *)malloc(out_w * sizeof(int));
+    if (!h_start || !h_end || !w_start || !w_end)
+    {
+        free(h_start);
+        free(h_end);
+        free(w_start);
+        free(w_end);
+        return TENSOR_ERR_MEMORY;
+    }
+
+    for (int oh = 0; oh < out_h; ++oh)
+    {
+        h_start[oh] = (int)floorf(oh * H / (float)out_h);
+        h_end[oh] = (int)floorf((oh + 1) * H / (float)out_h);
+        if (h_end[oh] <= h_start[oh])
+            h_end[oh] = h_start[oh] + 1;
+    }
+    for (int ow = 0; ow < out_w; ++ow)
+    {
+        w_start[ow] = (int)floorf(ow * W / (float)out_w);
+        w_end[ow] = (int)floorf((ow + 1) * W / (float)out_w);
+        if (w_end[ow] <= w_start[ow])
+            w_end[ow] = w_start[ow] + 1;
+    }
+
+    int out_coords[4] = {0};
+    while (1)
+    {
+        int n = out_coords[0];
+        int c = out_coords[1];
+        int oh = out_coords[2];
+        int ow = out_coords[3];
+
+        int start_h = h_start[oh];
+        int end_h = h_end[oh];
+        int start_w = w_start[ow];
+        int end_w = w_end[ow];
+        int kernel_h = end_h - start_h;
+        int kernel_w = end_w - start_w;
+        float inv_count = 1.0f / (kernel_h * kernel_w);
+
+        double sum = 0.0;
+        for (int ih = start_h; ih < end_h; ++ih)
+        {
+            for (int iw = start_w; iw < end_w; ++iw)
+            {
+                int in_coords[4] = {n, c, ih, iw};
+                ptrdiff_t in_off = util_offset_from_coords(in_coords, x_strides, 4);
+                sum += x->data[in_off];
+            }
+        }
+
+        ptrdiff_t out_off = util_offset_from_coords(out_coords, out_strides, 4);
+        out->data[out_off] = (float)(sum * inv_count);
+
+        if (util_increment_coords(out_coords, out->dims, 4))
+            break;
+    }
+
+    free(h_start);
+    free(h_end);
+    free(w_start);
+    free(w_end);
+    return TENSOR_OK;
+}
+
+/* ==================== 嵌入层 ==================== */
+TensorStatus tensor_embedding(const Tensor *input, const Tensor *weight,
+                              int padding_idx, Tensor *out)
+{
+    if (!input || !weight || !out)
+        return TENSOR_ERR_NULL_PTR;
+    if (weight->ndim != 2)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    int vocab_size = weight->dims[0];
+    int emb_dim = weight->dims[1];
+    int in_ndim = input->ndim;
+
+    // 输出形状 = input.shape + [emb_dim]
+    int out_ndim = in_ndim + 1;
+    int out_dims[TENSOR_MAX_DIM];
+    for (int i = 0; i < in_ndim; ++i)
+        out_dims[i] = input->dims[i];
+    out_dims[in_ndim] = emb_dim;
+
+    if (out->ndim != out_ndim)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+    for (int i = 0; i < out_ndim; ++i)
+        if (out->dims[i] != out_dims[i])
+            return TENSOR_ERR_SHAPE_MISMATCH;
+
+    TensorStatus status = tensor_make_unique(out);
+    if (status != TENSOR_OK)
+        return status;
+
+    int in_strides[TENSOR_MAX_DIM], w_strides[2], out_strides[TENSOR_MAX_DIM];
+    util_get_effective_strides(input, in_strides);
+    util_get_effective_strides(weight, w_strides);
+    util_get_effective_strides(out, out_strides);
+
+    int in_coords[TENSOR_MAX_DIM] = {0};
+    while (1)
+    {
+        ptrdiff_t in_off = util_offset_from_coords(in_coords, in_strides, in_ndim);
+        float idx_float = input->data[in_off];
+        TensorStatus st;
+        int idx = tensor_float_to_index(idx_float, vocab_size, &st);
+        if (st != TENSOR_OK)
+            return st;
+
+        ptrdiff_t out_base = 0;
+        for (int i = 0; i < in_ndim; ++i)
+            out_base += in_coords[i] * out_strides[i];
+
+        if (padding_idx >= 0 && idx == padding_idx)
+        {
+            for (int e = 0; e < emb_dim; ++e)
+            {
+                ptrdiff_t out_off = out_base + e * out_strides[in_ndim];
+                out->data[out_off] = 0.0f;
+            }
+        }
+        else
+        {
+            ptrdiff_t w_base = idx * w_strides[0];
+            for (int e = 0; e < emb_dim; ++e)
+            {
+                ptrdiff_t out_off = out_base + e * out_strides[in_ndim];
+                ptrdiff_t w_off = w_base + e * w_strides[1];
+                out->data[out_off] = weight->data[w_off];
+            }
+        }
+
+        if (util_increment_coords(in_coords, input->dims, in_ndim))
+            break;
+    }
+    return TENSOR_OK;
+}
+
+/* ==================== 1D 上采样辅助函数 ==================== */
+static float cubic_interp1d(float p0, float p1, float p2, float p3, float t)
+{
+    return 0.5f * ((-p0 + 3 * p1 - 3 * p2 + p3) * t * t * t +
+                   (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t +
+                   (-p0 + p2) * t +
+                   2 * p1);
+}
+
+static TensorStatus upsample1d_linear(const Tensor *x, int scale, int align_corners, Tensor *out)
+{
+    int N = x->dims[0], C = x->dims[1], L = x->dims[2];
+    int out_len = out->dims[2];
+    int x_strides[3], out_strides[3];
+    util_get_effective_strides(x, x_strides);
+    util_get_effective_strides(out, out_strides);
+
+    float inv_scale = 1.0f / scale;
+    float factor = align_corners ? (L - 1.0f) / (out_len - 1.0f) : inv_scale;
+
+    for (int n = 0; n < N; ++n)
+    {
+        for (int c = 0; c < C; ++c)
+        {
+            for (int ol = 0; ol < out_len; ++ol)
+            {
+                float xf;
+                if (align_corners)
+                {
+                    if (ol == 0)
+                        xf = 0.0f;
+                    else if (ol == out_len - 1)
+                        xf = L - 1.0f;
+                    else
+                        xf = ol * factor;
+                }
+                else
+                {
+                    xf = (ol + 0.5f) * inv_scale - 0.5f;
+                }
+
+                int i0 = (int)floorf(xf);
+                int i1 = i0 + 1;
+                float t = xf - i0;
+
+                if (i0 < 0)
+                {
+                    i0 = 0;
+                    i1 = 0;
+                    t = 0.0f;
+                }
+                else if (i1 >= L)
+                {
+                    i0 = L - 1;
+                    i1 = L - 1;
+                    t = 0.0f;
+                }
+
+                ptrdiff_t off0 = n * x_strides[0] + c * x_strides[1] + i0 * x_strides[2];
+                ptrdiff_t off1 = n * x_strides[0] + c * x_strides[1] + i1 * x_strides[2];
+                float v0 = x->data[off0];
+                float v1 = x->data[off1];
+                float val = v0 * (1 - t) + v1 * t;
+
+                ptrdiff_t out_off = n * out_strides[0] + c * out_strides[1] + ol * out_strides[2];
+                out->data[out_off] = val;
+            }
+        }
+    }
+    return TENSOR_OK;
+}
+
+static TensorStatus upsample1d_cubic(const Tensor *x, int scale, int align_corners, Tensor *out)
+{
+    int N = x->dims[0], C = x->dims[1], L = x->dims[2];
+    int out_len = out->dims[2];
+    int x_strides[3], out_strides[3];
+    util_get_effective_strides(x, x_strides);
+    util_get_effective_strides(out, out_strides);
+
+    float inv_scale = 1.0f / scale;
+    float factor = align_corners ? (L - 1.0f) / (out_len - 1.0f) : inv_scale;
+
+    for (int n = 0; n < N; ++n)
+    {
+        for (int c = 0; c < C; ++c)
+        {
+            for (int ol = 0; ol < out_len; ++ol)
+            {
+                float xf;
+                if (align_corners)
+                {
+                    if (ol == 0)
+                        xf = 0.0f;
+                    else if (ol == out_len - 1)
+                        xf = L - 1.0f;
+                    else
+                        xf = ol * factor;
+                }
+                else
+                {
+                    xf = (ol + 0.5f) * inv_scale - 0.5f;
+                }
+
+                int i0 = (int)floorf(xf) - 1;
+                int i1 = i0 + 1;
+                int i2 = i0 + 2;
+                int i3 = i0 + 3;
+                float t = xf - floorf(xf);
+
+                i0 = reflect_coord(i0, L);
+                i1 = reflect_coord(i1, L);
+                i2 = reflect_coord(i2, L);
+                i3 = reflect_coord(i3, L);
+
+                ptrdiff_t off0 = n * x_strides[0] + c * x_strides[1] + i0 * x_strides[2];
+                ptrdiff_t off1 = n * x_strides[0] + c * x_strides[1] + i1 * x_strides[2];
+                ptrdiff_t off2 = n * x_strides[0] + c * x_strides[1] + i2 * x_strides[2];
+                ptrdiff_t off3 = n * x_strides[0] + c * x_strides[1] + i3 * x_strides[2];
+                float p0 = x->data[off0];
+                float p1 = x->data[off1];
+                float p2 = x->data[off2];
+                float p3 = x->data[off3];
+                float val = cubic_interp1d(p0, p1, p2, p3, t);
+
+                ptrdiff_t out_off = n * out_strides[0] + c * out_strides[1] + ol * out_strides[2];
+                out->data[out_off] = val;
+            }
+        }
+    }
+    return TENSOR_OK;
+}
+
+/* ==================== 1D 上采样 API ==================== */
+TensorStatus tensor_upsample1d(const Tensor *x, int scale,
+                               InterpMode mode, int align_corners,
+                               Tensor *out)
+{
+    if (!x || !out)
+        return TENSOR_ERR_NULL_PTR;
+    if (x->ndim != 3)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+    if (scale <= 0)
+        return TENSOR_ERR_INVALID_PARAM;
+
+    int N = x->dims[0], C = x->dims[1], L = x->dims[2];
+    int out_len = L * scale;
+
+    if (out->ndim != 3 || out->dims[0] != N || out->dims[1] != C || out->dims[2] != out_len)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    TensorStatus status = tensor_make_unique(out);
+    if (status != TENSOR_OK)
+        return status;
+
+    if (mode == UPSAMPLE_NEAREST)
+    {
+        int x_strides[3], out_strides[3];
+        util_get_effective_strides(x, x_strides);
+        util_get_effective_strides(out, out_strides);
+        for (int n = 0; n < N; ++n)
+            for (int c = 0; c < C; ++c)
+                for (int ol = 0; ol < out_len; ++ol)
+                {
+                    int il = ol / scale;
+                    ptrdiff_t x_off = n * x_strides[0] + c * x_strides[1] + il * x_strides[2];
+                    ptrdiff_t out_off = n * out_strides[0] + c * out_strides[1] + ol * out_strides[2];
+                    out->data[out_off] = x->data[x_off];
+                }
+        return TENSOR_OK;
+    }
+    else if (mode == UPSAMPLE_LINEAR)
+    {
+        return upsample1d_linear(x, scale, align_corners, out);
+    }
+    else if (mode == UPSAMPLE_CUBIC)
+    {
+        return upsample1d_cubic(x, scale, align_corners, out);
+    }
+    return TENSOR_ERR_INVALID_PARAM;
+}
+
+/* ==================== 3D 上采样辅助函数 ==================== */
+static TensorStatus upsample3d_linear(const Tensor *x,
+                                      int scale_d, int scale_h, int scale_w,
+                                      int align_corners, Tensor *out)
+{
+    int N = x->dims[0], C = x->dims[1], D = x->dims[2], H = x->dims[3], W = x->dims[4];
+    int out_d = out->dims[2], out_h = out->dims[3], out_w = out->dims[4];
+
+    int x_strides[5], out_strides[5];
+    util_get_effective_strides(x, x_strides);
+    util_get_effective_strides(out, out_strides);
+
+    float inv_scale_d = 1.0f / scale_d;
+    float inv_scale_h = 1.0f / scale_h;
+    float inv_scale_w = 1.0f / scale_w;
+    float factor_d = align_corners ? (D - 1.0f) / (out_d - 1.0f) : inv_scale_d;
+    float factor_h = align_corners ? (H - 1.0f) / (out_h - 1.0f) : inv_scale_h;
+    float factor_w = align_corners ? (W - 1.0f) / (out_w - 1.0f) : inv_scale_w;
+
+    for (int n = 0; n < N; ++n)
+    {
+        for (int c = 0; c < C; ++c)
+        {
+            for (int od = 0; od < out_d; ++od)
+            {
+                float df;
+                if (align_corners)
+                {
+                    if (od == 0)
+                        df = 0.0f;
+                    else if (od == out_d - 1)
+                        df = D - 1.0f;
+                    else
+                        df = od * factor_d;
+                }
+                else
+                {
+                    df = (od + 0.5f) * inv_scale_d - 0.5f;
+                }
+                int id0 = (int)floorf(df);
+                int id1 = id0 + 1;
+                float td = df - id0;
+                if (id0 < 0)
+                {
+                    id0 = 0;
+                    id1 = 0;
+                    td = 0.0f;
+                }
+                else if (id1 >= D)
+                {
+                    id0 = D - 1;
+                    id1 = D - 1;
+                    td = 0.0f;
+                }
+
+                for (int oh = 0; oh < out_h; ++oh)
+                {
+                    float hf;
+                    if (align_corners)
+                    {
+                        if (oh == 0)
+                            hf = 0.0f;
+                        else if (oh == out_h - 1)
+                            hf = H - 1.0f;
+                        else
+                            hf = oh * factor_h;
+                    }
+                    else
+                    {
+                        hf = (oh + 0.5f) * inv_scale_h - 0.5f;
+                    }
+                    int ih0 = (int)floorf(hf);
+                    int ih1 = ih0 + 1;
+                    float th = hf - ih0;
+                    if (ih0 < 0)
+                    {
+                        ih0 = 0;
+                        ih1 = 0;
+                        th = 0.0f;
+                    }
+                    else if (ih1 >= H)
+                    {
+                        ih0 = H - 1;
+                        ih1 = H - 1;
+                        th = 0.0f;
+                    }
+
+                    for (int ow = 0; ow < out_w; ++ow)
+                    {
+                        float wf;
+                        if (align_corners)
+                        {
+                            if (ow == 0)
+                                wf = 0.0f;
+                            else if (ow == out_w - 1)
+                                wf = W - 1.0f;
+                            else
+                                wf = ow * factor_w;
+                        }
+                        else
+                        {
+                            wf = (ow + 0.5f) * inv_scale_w - 0.5f;
+                        }
+                        int iw0 = (int)floorf(wf);
+                        int iw1 = iw0 + 1;
+                        float tw = wf - iw0;
+                        if (iw0 < 0)
+                        {
+                            iw0 = 0;
+                            iw1 = 0;
+                            tw = 0.0f;
+                        }
+                        else if (iw1 >= W)
+                        {
+                            iw0 = W - 1;
+                            iw1 = W - 1;
+                            tw = 0.0f;
+                        }
+
+                        // 获取8个点
+#define GET_VAL(d, h, w) x->data[n * x_strides[0] + c * x_strides[1] + \
+                                 (d) * x_strides[2] + (h) * x_strides[3] + (w) * x_strides[4]]
+                        float v000 = GET_VAL(id0, ih0, iw0);
+                        float v001 = GET_VAL(id0, ih0, iw1);
+                        float v010 = GET_VAL(id0, ih1, iw0);
+                        float v011 = GET_VAL(id0, ih1, iw1);
+                        float v100 = GET_VAL(id1, ih0, iw0);
+                        float v101 = GET_VAL(id1, ih0, iw1);
+                        float v110 = GET_VAL(id1, ih1, iw0);
+                        float v111 = GET_VAL(id1, ih1, iw1);
+#undef GET_VAL
+
+                        // 三线性插值
+                        float v00 = v000 * (1 - tw) + v001 * tw;
+                        float v01 = v010 * (1 - tw) + v011 * tw;
+                        float v10 = v100 * (1 - tw) + v101 * tw;
+                        float v11 = v110 * (1 - tw) + v111 * tw;
+
+                        float v0 = v00 * (1 - th) + v01 * th;
+                        float v1 = v10 * (1 - th) + v11 * th;
+
+                        float val = v0 * (1 - td) + v1 * td;
+
+                        ptrdiff_t out_off = n * out_strides[0] + c * out_strides[1] +
+                                            od * out_strides[2] + oh * out_strides[3] + ow * out_strides[4];
+                        out->data[out_off] = val;
+                    }
+                }
+            }
+        }
+    }
+    return TENSOR_OK;
+}
+
+static TensorStatus upsample3d_cubic(const Tensor *x,
+                                     int scale_d, int scale_h, int scale_w,
+                                     int align_corners, Tensor *out)
+{
+    int N = x->dims[0], C = x->dims[1], D = x->dims[2], H = x->dims[3], W = x->dims[4];
+    int out_d = out->dims[2], out_h = out->dims[3], out_w = out->dims[4];
+
+    int x_strides[5], out_strides[5];
+    util_get_effective_strides(x, x_strides);
+    util_get_effective_strides(out, out_strides);
+
+    float inv_scale_d = 1.0f / scale_d;
+    float inv_scale_h = 1.0f / scale_h;
+    float inv_scale_w = 1.0f / scale_w;
+    float factor_d = align_corners ? (D - 1.0f) / (out_d - 1.0f) : inv_scale_d;
+    float factor_h = align_corners ? (H - 1.0f) / (out_h - 1.0f) : inv_scale_h;
+    float factor_w = align_corners ? (W - 1.0f) / (out_w - 1.0f) : inv_scale_w;
+
+    for (int n = 0; n < N; ++n)
+    {
+        for (int c = 0; c < C; ++c)
+        {
+            for (int od = 0; od < out_d; ++od)
+            {
+                float df;
+                if (align_corners)
+                {
+                    if (od == 0)
+                        df = 0.0f;
+                    else if (od == out_d - 1)
+                        df = D - 1.0f;
+                    else
+                        df = od * factor_d;
+                }
+                else
+                {
+                    df = (od + 0.5f) * inv_scale_d - 0.5f;
+                }
+                int id0 = (int)floorf(df) - 1;
+                int id1 = id0 + 1;
+                int id2 = id0 + 2;
+                int id3 = id0 + 3;
+                float td = df - floorf(df);
+
+                id0 = reflect_coord(id0, D);
+                id1 = reflect_coord(id1, D);
+                id2 = reflect_coord(id2, D);
+                id3 = reflect_coord(id3, D);
+
+                for (int oh = 0; oh < out_h; ++oh)
+                {
+                    float hf;
+                    if (align_corners)
+                    {
+                        if (oh == 0)
+                            hf = 0.0f;
+                        else if (oh == out_h - 1)
+                            hf = H - 1.0f;
+                        else
+                            hf = oh * factor_h;
+                    }
+                    else
+                    {
+                        hf = (oh + 0.5f) * inv_scale_h - 0.5f;
+                    }
+                    int ih0 = (int)floorf(hf) - 1;
+                    int ih1 = ih0 + 1;
+                    int ih2 = ih0 + 2;
+                    int ih3 = ih0 + 3;
+                    float th = hf - floorf(hf);
+
+                    ih0 = reflect_coord(ih0, H);
+                    ih1 = reflect_coord(ih1, H);
+                    ih2 = reflect_coord(ih2, H);
+                    ih3 = reflect_coord(ih3, H);
+
+                    for (int ow = 0; ow < out_w; ++ow)
+                    {
+                        float wf;
+                        if (align_corners)
+                        {
+                            if (ow == 0)
+                                wf = 0.0f;
+                            else if (ow == out_w - 1)
+                                wf = W - 1.0f;
+                            else
+                                wf = ow * factor_w;
+                        }
+                        else
+                        {
+                            wf = (ow + 0.5f) * inv_scale_w - 0.5f;
+                        }
+                        int iw0 = (int)floorf(wf) - 1;
+                        int iw1 = iw0 + 1;
+                        int iw2 = iw0 + 2;
+                        int iw3 = iw0 + 3;
+                        float tw = wf - floorf(wf);
+
+                        iw0 = reflect_coord(iw0, W);
+                        iw1 = reflect_coord(iw1, W);
+                        iw2 = reflect_coord(iw2, W);
+                        iw3 = reflect_coord(iw3, W);
+
+                        // 获取64个点，并在三个方向上进行三次插值
+                        // 首先在 w 方向插值，得到 4x4 的中间值
+                        float temp[4][4];
+                        int d_idx[4] = {id0, id1, id2, id3};
+                        int h_idx[4] = {ih0, ih1, ih2, ih3};
+                        int w_idx[4] = {iw0, iw1, iw2, iw3};
+
+                        for (int di = 0; di < 4; ++di)
+                        {
+                            for (int hi = 0; hi < 4; ++hi)
+                            {
+                                float p[4];
+                                for (int wi = 0; wi < 4; ++wi)
+                                {
+                                    ptrdiff_t off = n * x_strides[0] + c * x_strides[1] +
+                                                    d_idx[di] * x_strides[2] +
+                                                    h_idx[hi] * x_strides[3] +
+                                                    w_idx[wi] * x_strides[4];
+                                    p[wi] = x->data[off];
+                                }
+                                temp[di][hi] = cubic_interp1d(p[0], p[1], p[2], p[3], tw);
+                            }
+                        }
+
+                        // 在 h 方向插值
+                        float temp2[4];
+                        for (int di = 0; di < 4; ++di)
+                        {
+                            temp2[di] = cubic_interp1d(temp[di][0], temp[di][1], temp[di][2], temp[di][3], th);
+                        }
+
+                        // 在 d 方向插值
+                        float val = cubic_interp1d(temp2[0], temp2[1], temp2[2], temp2[3], td);
+
+                        ptrdiff_t out_off = n * out_strides[0] + c * out_strides[1] +
+                                            od * out_strides[2] + oh * out_strides[3] + ow * out_strides[4];
+                        out->data[out_off] = val;
+                    }
+                }
+            }
+        }
+    }
+    return TENSOR_OK;
+}
+
+/* ==================== 3D 上采样 API ==================== */
+TensorStatus tensor_upsample3d(const Tensor *x,
+                               int scale_d, int scale_h, int scale_w,
+                               InterpMode mode, int align_corners,
+                               Tensor *out)
+{
+    if (!x || !out)
+        return TENSOR_ERR_NULL_PTR;
+    if (x->ndim != 5)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+    if (scale_d <= 0 || scale_h <= 0 || scale_w <= 0)
+        return TENSOR_ERR_INVALID_PARAM;
+
+    int N = x->dims[0], C = x->dims[1], D = x->dims[2], H = x->dims[3], W = x->dims[4];
+    int out_d = D * scale_d, out_h = H * scale_h, out_w = W * scale_w;
+
+    if (out->ndim != 5 ||
+        out->dims[0] != N || out->dims[1] != C ||
+        out->dims[2] != out_d || out->dims[3] != out_h || out->dims[4] != out_w)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    TensorStatus status = tensor_make_unique(out);
+    if (status != TENSOR_OK)
+        return status;
+
+    if (mode == UPSAMPLE_NEAREST)
+    {
+        int x_strides[5], out_strides[5];
+        util_get_effective_strides(x, x_strides);
+        util_get_effective_strides(out, out_strides);
+        for (int n = 0; n < N; ++n)
+            for (int c = 0; c < C; ++c)
+                for (int od = 0; od < out_d; ++od)
+                {
+                    int id = od / scale_d;
+                    for (int oh = 0; oh < out_h; ++oh)
+                    {
+                        int ih = oh / scale_h;
+                        for (int ow = 0; ow < out_w; ++ow)
+                        {
+                            int iw = ow / scale_w;
+                            ptrdiff_t x_off = n * x_strides[0] + c * x_strides[1] +
+                                              id * x_strides[2] + ih * x_strides[3] + iw * x_strides[4];
+                            ptrdiff_t out_off = n * out_strides[0] + c * out_strides[1] +
+                                                od * out_strides[2] + oh * out_strides[3] + ow * out_strides[4];
+                            out->data[out_off] = x->data[x_off];
+                        }
+                    }
+                }
+        return TENSOR_OK;
+    }
+    else if (mode == UPSAMPLE_LINEAR)
+    {
+        return upsample3d_linear(x, scale_d, scale_h, scale_w, align_corners, out);
+    }
+    else if (mode == UPSAMPLE_CUBIC)
+    {
+        return upsample3d_cubic(x, scale_d, scale_h, scale_w, align_corners, out);
+    }
+    return TENSOR_ERR_INVALID_PARAM;
+}
+
+/* ==================== 1D 自适应平均池化 ==================== */
+TensorStatus tensor_adaptive_avg_pool1d(const Tensor *x,
+                                        const int *output_size,
+                                        Tensor *out)
+{
+    if (!x || !out || !output_size)
+        return TENSOR_ERR_NULL_PTR;
+    if (x->ndim != 3)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    int N = x->dims[0], C = x->dims[1], L = x->dims[2];
+    int out_len = output_size[0];
+    if (out_len <= 0 || out_len > L)
+        return TENSOR_ERR_INVALID_PARAM;
+
+    if (out->ndim != 3 || out->dims[0] != N || out->dims[1] != C || out->dims[2] != out_len)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    TensorStatus status = tensor_make_unique(out);
+    if (status != TENSOR_OK)
+        return status;
+
+    int x_strides[3], out_strides[3];
+    util_get_effective_strides(x, x_strides);
+    util_get_effective_strides(out, out_strides);
+
+    int *start = (int *)malloc(out_len * sizeof(int));
+    int *end = (int *)malloc(out_len * sizeof(int));
+    if (!start || !end)
+    {
+        free(start);
+        free(end);
+        return TENSOR_ERR_MEMORY;
+    }
+
+    for (int ol = 0; ol < out_len; ++ol)
+    {
+        start[ol] = (int)floorf(ol * L / (float)out_len);
+        end[ol] = (int)floorf((ol + 1) * L / (float)out_len);
+        if (end[ol] <= start[ol])
+            end[ol] = start[ol] + 1;
+    }
+
+    for (int n = 0; n < N; ++n)
+    {
+        for (int c = 0; c < C; ++c)
+        {
+            for (int ol = 0; ol < out_len; ++ol)
+            {
+                double sum = 0.0;
+                int cnt = 0;
+                for (int il = start[ol]; il < end[ol]; ++il)
+                {
+                    ptrdiff_t x_off = n * x_strides[0] + c * x_strides[1] + il * x_strides[2];
+                    sum += x->data[x_off];
+                    cnt++;
+                }
+                float avg = (cnt == 0) ? 0.0f : (float)(sum / cnt);
+                ptrdiff_t out_off = n * out_strides[0] + c * out_strides[1] + ol * out_strides[2];
+                out->data[out_off] = avg;
+            }
+        }
+    }
+
+    free(start);
+    free(end);
+    return TENSOR_OK;
+}
+
+/* ==================== 3D 自适应平均池化 ==================== */
+TensorStatus tensor_adaptive_avg_pool3d(const Tensor *x,
+                                        const int *output_size,
+                                        Tensor *out)
+{
+    if (!x || !out || !output_size)
+        return TENSOR_ERR_NULL_PTR;
+    if (x->ndim != 5)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    int N = x->dims[0], C = x->dims[1], D = x->dims[2], H = x->dims[3], W = x->dims[4];
+    int out_d = output_size[0], out_h = output_size[1], out_w = output_size[2];
+    if (out_d <= 0 || out_d > D || out_h <= 0 || out_h > H || out_w <= 0 || out_w > W)
+        return TENSOR_ERR_INVALID_PARAM;
+
+    if (out->ndim != 5 ||
+        out->dims[0] != N || out->dims[1] != C ||
+        out->dims[2] != out_d || out->dims[3] != out_h || out->dims[4] != out_w)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    TensorStatus status = tensor_make_unique(out);
+    if (status != TENSOR_OK)
+        return status;
+
+    int x_strides[5], out_strides[5];
+    util_get_effective_strides(x, x_strides);
+    util_get_effective_strides(out, out_strides);
+
+    int *d_start = (int *)malloc(out_d * sizeof(int));
+    int *d_end = (int *)malloc(out_d * sizeof(int));
+    int *h_start = (int *)malloc(out_h * sizeof(int));
+    int *h_end = (int *)malloc(out_h * sizeof(int));
+    int *w_start = (int *)malloc(out_w * sizeof(int));
+    int *w_end = (int *)malloc(out_w * sizeof(int));
+    if (!d_start || !d_end || !h_start || !h_end || !w_start || !w_end)
+    {
+        free(d_start);
+        free(d_end);
+        free(h_start);
+        free(h_end);
+        free(w_start);
+        free(w_end);
+        return TENSOR_ERR_MEMORY;
+    }
+
+    for (int od = 0; od < out_d; ++od)
+    {
+        d_start[od] = (int)floorf(od * D / (float)out_d);
+        d_end[od] = (int)floorf((od + 1) * D / (float)out_d);
+        if (d_end[od] <= d_start[od])
+            d_end[od] = d_start[od] + 1;
+    }
+    for (int oh = 0; oh < out_h; ++oh)
+    {
+        h_start[oh] = (int)floorf(oh * H / (float)out_h);
+        h_end[oh] = (int)floorf((oh + 1) * H / (float)out_h);
+        if (h_end[oh] <= h_start[oh])
+            h_end[oh] = h_start[oh] + 1;
+    }
+    for (int ow = 0; ow < out_w; ++ow)
+    {
+        w_start[ow] = (int)floorf(ow * W / (float)out_w);
+        w_end[ow] = (int)floorf((ow + 1) * W / (float)out_w);
+        if (w_end[ow] <= w_start[ow])
+            w_end[ow] = w_start[ow] + 1;
+    }
+
+    for (int n = 0; n < N; ++n)
+    {
+        for (int c = 0; c < C; ++c)
+        {
+            for (int od = 0; od < out_d; ++od)
+            {
+                for (int oh = 0; oh < out_h; ++oh)
+                {
+                    for (int ow = 0; ow < out_w; ++ow)
+                    {
+                        double sum = 0.0;
+                        int cnt = 0;
+                        for (int id = d_start[od]; id < d_end[od]; ++id)
+                            for (int ih = h_start[oh]; ih < h_end[oh]; ++ih)
+                                for (int iw = w_start[ow]; iw < w_end[ow]; ++iw)
+                                {
+                                    ptrdiff_t x_off = n * x_strides[0] + c * x_strides[1] +
+                                                      id * x_strides[2] + ih * x_strides[3] + iw * x_strides[4];
+                                    sum += x->data[x_off];
+                                    cnt++;
+                                }
+                        float avg = (cnt == 0) ? 0.0f : (float)(sum / cnt);
+                        ptrdiff_t out_off = n * out_strides[0] + c * out_strides[1] +
+                                            od * out_strides[2] + oh * out_strides[3] + ow * out_strides[4];
+                        out->data[out_off] = avg;
+                    }
+                }
+            }
+        }
+    }
+
+    free(d_start);
+    free(d_end);
+    free(h_start);
+    free(h_end);
+    free(w_start);
+    free(w_end);
+    return TENSOR_OK;
+}
+
+/* ==================== 1D 最大反池化 ==================== */
+TensorStatus tensor_max_unpool1d(const Tensor *x, const Tensor *indices,
+                                 const int *output_size, Tensor *out)
+{
+    if (!x || !indices || !out || !output_size)
+        return TENSOR_ERR_NULL_PTR;
+    if (x->ndim != 3 || indices->ndim != 3)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+    for (int i = 0; i < 3; ++i)
+        if (x->dims[i] != indices->dims[i])
+            return TENSOR_ERR_SHAPE_MISMATCH;
+
+    int N = x->dims[0], C = x->dims[1], L_in = x->dims[2];
+    int out_len = output_size[0];
+    if (out_len <= 0)
+        return TENSOR_ERR_INVALID_PARAM;
+
+    if (out->ndim != 3 || out->dims[0] != N || out->dims[1] != C || out->dims[2] != out_len)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    TensorStatus status = tensor_make_unique(out);
+    if (status != TENSOR_OK)
+        return status;
+
+    int x_strides[3], idx_strides[3], out_strides[3];
+    util_get_effective_strides(x, x_strides);
+    util_get_effective_strides(indices, idx_strides);
+    util_get_effective_strides(out, out_strides);
+
+    util_clear_tensor(out);
+
+    int coords[3] = {0};
+    while (1)
+    {
+        ptrdiff_t x_off = util_offset_from_coords(coords, x_strides, 3);
+        ptrdiff_t idx_off = util_offset_from_coords(coords, idx_strides, 3);
+        float val = x->data[x_off];
+        float idx_float = indices->data[idx_off];
+        TensorStatus st;
+        int idx_val = tensor_float_to_index(idx_float, out_len, &st);
+        if (st != TENSOR_OK)
+            return st;
+
+        int out_coords[3] = {coords[0], coords[1], idx_val};
+        ptrdiff_t out_off = util_offset_from_coords(out_coords, out_strides, 3);
+        out->data[out_off] += val;
+
+        if (util_increment_coords(coords, x->dims, 3))
+            break;
+    }
+    return TENSOR_OK;
+}
+
+/* ==================== 3D 最大反池化 ==================== */
+TensorStatus tensor_max_unpool3d(const Tensor *x, const Tensor *indices,
+                                 const int *output_size, Tensor *out)
+{
+    if (!x || !indices || !out || !output_size)
+        return TENSOR_ERR_NULL_PTR;
+    if (x->ndim != 5 || indices->ndim != 5)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+    for (int i = 0; i < 5; ++i)
+        if (x->dims[i] != indices->dims[i])
+            return TENSOR_ERR_SHAPE_MISMATCH;
+
+    int N = x->dims[0], C = x->dims[1];
+    int D_in = x->dims[2], H_in = x->dims[3], W_in = x->dims[4];
+    int out_d = output_size[0], out_h = output_size[1], out_w = output_size[2];
+    if (out_d <= 0 || out_h <= 0 || out_w <= 0)
+        return TENSOR_ERR_INVALID_PARAM;
+
+    if (out->ndim != 5 ||
+        out->dims[0] != N || out->dims[1] != C ||
+        out->dims[2] != out_d || out->dims[3] != out_h || out->dims[4] != out_w)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    TensorStatus status = tensor_make_unique(out);
+    if (status != TENSOR_OK)
+        return status;
+
+    int x_strides[5], idx_strides[5], out_strides[5];
+    util_get_effective_strides(x, x_strides);
+    util_get_effective_strides(indices, idx_strides);
+    util_get_effective_strides(out, out_strides);
+
+    util_clear_tensor(out);
+
+    int coords[5] = {0};
+    while (1)
+    {
+        ptrdiff_t x_off = util_offset_from_coords(coords, x_strides, 5);
+        ptrdiff_t idx_off = util_offset_from_coords(coords, idx_strides, 5);
+        float val = x->data[x_off];
+        float idx_float = indices->data[idx_off];
+        TensorStatus st;
+        int idx_val = tensor_float_to_index(idx_float, out_d * out_h * out_w, &st);
+        if (st != TENSOR_OK)
+            return st;
+
+        int out_coords[5] = {
+            coords[0], coords[1],
+            idx_val / (out_h * out_w),
+            (idx_val / out_w) % out_h,
+            idx_val % out_w};
+        ptrdiff_t out_off = util_offset_from_coords(out_coords, out_strides, 5);
+        out->data[out_off] += val;
+
+        if (util_increment_coords(coords, x->dims, 5))
+            break;
+    }
+    return TENSOR_OK;
 }

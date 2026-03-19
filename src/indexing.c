@@ -6,14 +6,43 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-/* ---------- 单个元素访问 ---------- */
+/**
+ * @file indexing.c
+ * @brief 索引与高级索引操作的实现
+ *
+ * 包含单元素访问、切片视图、整数数组高级索引、布尔掩码选择、
+ * 按索引赋值（index_put）、gather 和 scatter 等操作。
+ * 所有函数均遵循写时拷贝原则，在需要修改数据时先调用 tensor_make_unique。
+ */
 
+/* ==================== 辅助函数声明 ==================== */
+
+/**
+ * @brief 计算多个索引张量的广播形状
+ * @param indices 索引张量数组
+ * @param num_indices 索引张量个数
+ * @param out_dims 输出广播后形状数组（长度至少为最大维度）
+ * @param out_ndim 输出广播后维度数
+ * @return 1 表示可广播，0 表示不可广播
+ */
+static int broadcast_indices_shape(const Tensor **indices, int num_indices,
+                                   int *out_dims, int *out_ndim);
+
+/* ==================== 单个元素访问 ==================== */
+
+/**
+ * @brief 获取单个元素值
+ * @param src 源张量
+ * @param indices 索引数组，长度等于 src 的维度
+ * @param out_value 输出值
+ * @return TensorStatus
+ */
 TensorStatus tensor_get_item(const Tensor *src, const int *indices, float *out_value)
 {
     if (!src || !indices || !out_value)
         return TENSOR_ERR_NULL_PTR;
 
-    size_t off = tensor_offset(src, indices);
+    ptrdiff_t off = tensor_offset(src, indices);
     if (off == SIZE_MAX)
         return TENSOR_ERR_INDEX_OUT_OF_BOUNDS;
 
@@ -21,6 +50,13 @@ TensorStatus tensor_get_item(const Tensor *src, const int *indices, float *out_v
     return TENSOR_OK;
 }
 
+/**
+ * @brief 设置单个元素值（可能触发写时拷贝）
+ * @param dst 目标张量
+ * @param indices 索引数组
+ * @param value 要设置的值
+ * @return TensorStatus
+ */
 TensorStatus tensor_set_item(Tensor *dst, const int *indices, float value)
 {
     if (!dst || !indices)
@@ -30,7 +66,7 @@ TensorStatus tensor_set_item(Tensor *dst, const int *indices, float value)
     if (status != TENSOR_OK)
         return status;
 
-    size_t off = tensor_offset(dst, indices);
+    ptrdiff_t off = tensor_offset(dst, indices);
     if (off == SIZE_MAX)
         return TENSOR_ERR_INDEX_OUT_OF_BOUNDS;
 
@@ -38,37 +74,60 @@ TensorStatus tensor_set_item(Tensor *dst, const int *indices, float value)
     return TENSOR_OK;
 }
 
-/* ---------- 切片（返回视图） ---------- */
+/* ==================== 切片（返回视图） ==================== */
 
-TensorStatus tensor_get_slice(const Tensor *src, const int *starts, const int *ends,
-                              const int *steps, Tensor *out)
+/**
+ * @brief 切片获取子张量（返回视图）
+ * @param src 源张量
+ * @param starts 每个轴的起始索引
+ * @param ends 每个轴的结束索引（不包含）
+ * @param steps 每个轴的步长，为 NULL 则步长为1
+ * @param dst 输出张量（视图）
+ * @return TensorStatus
+ */
+TensorStatus tensor_slice(const Tensor *src, const int *starts, const int *ends,
+                          const int *steps, Tensor *dst)
 {
-    if (!src || !starts || !ends || !out)
+    // 1. 基础指针校验
+    if (!src || !starts || !ends || !dst)
         return TENSOR_ERR_NULL_PTR;
+
     int ndim = src->ndim;
+    // 2. 维度范围校验 (防止栈数组越界)
+    if (ndim < 0 || ndim > TENSOR_MAX_DIM)
+        return TENSOR_ERR_INVALID_PARAM;
 
-    // 复制步长数组，若 steps 为 NULL 则默认步长为 1
-    int *step_arr = (int *)malloc(ndim * sizeof(int));
-    if (!step_arr)
-        return TENSOR_ERR_MEMORY;
+    // 3. 分配临时资源
+    // 注意：当 ndim=0 时，malloc(0) 行为依实现而定，可能返回 NULL，需特殊处理
+    int *step_arr = NULL;
+    int *new_dims = NULL;
+    int *new_strides = NULL;
+
+    if (ndim > 0)
+    {
+        step_arr = (int *)malloc(ndim * sizeof(int));
+        new_dims = (int *)malloc(ndim * sizeof(int));
+        new_strides = (int *)malloc(ndim * sizeof(int));
+
+        if (!step_arr || !new_dims || !new_strides)
+        {
+            goto cleanup_error;
+        }
+    }
+
+    // 4. 初始化步长数组
     for (int i = 0; i < ndim; i++)
+    {
         step_arr[i] = (steps) ? steps[i] : 1;
+    }
 
-    // 获取源步长
+    // 5. 获取源步长
     int src_strides[TENSOR_MAX_DIM];
     util_get_effective_strides(src, src_strides);
 
-    int *new_dims = (int *)malloc(ndim * sizeof(int));
-    int *new_strides = (int *)malloc(ndim * sizeof(int));
-    if (!new_dims || !new_strides)
-    {
-        free(step_arr);
-        free(new_dims);
-        free(new_strides);
-        return TENSOR_ERR_MEMORY;
-    }
-
-    ptrdiff_t data_offset = 0; // 使用有符号类型，确保指针运算安全
+    // 6. 计算切片参数
+    ptrdiff_t data_offset = 0;
+    size_t total_size = 1;
 
     for (int i = 0; i < ndim; i++)
     {
@@ -77,15 +136,13 @@ TensorStatus tensor_get_slice(const Tensor *src, const int *starts, const int *e
         int end = ends[i];
         int step = step_arr[i];
 
+        // 步长不能为 0
         if (step == 0)
         {
-            free(step_arr);
-            free(new_dims);
-            free(new_strides);
-            return TENSOR_ERR_INVALID_PARAM;
+            goto cleanup_error;
         }
 
-        // 负索引处理
+        // 负索引处理 (Python 语义)
         if (start < 0)
             start += dim;
         if (end < 0)
@@ -102,58 +159,97 @@ TensorStatus tensor_get_slice(const Tensor *src, const int *starts, const int *e
             end = dim;
 
         // 计算切片后该维度的大小
-        int size;
+        int size = 0;
         if (step > 0)
         {
-            if (start >= end)
-                size = 0;
-            else
+            if (start < end)
+            {
                 size = (end - start + step - 1) / step;
-        }
-        else // step < 0
-        {
-            if (start <= end)
-                size = 0;
+            }
             else
+            {
+                size = 0; // 空切片
+            }
+        }
+        else
+        { // step < 0
+            if (start > end)
+            {
                 size = (start - end - step - 1) / (-step);
+            }
+            else
+            {
+                size = 0; // 空切片
+            }
         }
 
+        // 原逻辑：不允许空切片
         if (size == 0)
         {
-            free(step_arr);
-            free(new_dims);
-            free(new_strides);
-            return TENSOR_ERR_INVALID_PARAM; // 不允许空切片
+            goto cleanup_error;
         }
 
         new_dims[i] = size;
         new_strides[i] = src_strides[i] * step;
+
+        // 累加数据偏移 (防止溢出)
         data_offset += (ptrdiff_t)start * src_strides[i];
+
+        // 累加总大小 (防止溢出)
+        if (total_size > 0 && size > 0)
+        {
+            if (total_size > SIZE_MAX / (size_t)size)
+            {
+                goto cleanup_error; // 整数溢出
+            }
+            total_size *= (size_t)size;
+        }
     }
 
-    // 计算总元素数
-    size_t total_size = 1;
-    for (int i = 0; i < ndim; i++)
-        total_size *= new_dims[i];
+    // 7. 构建输出张量
+    dst->data = src->data + data_offset;
+    dst->ndim = ndim;
+    dst->dims = new_dims;       // 所有权转移
+    dst->strides = new_strides; // 所有权转移
+    dst->size = total_size;
 
-    // 填充输出视图
-    out->data = src->data + data_offset;
-    out->ndim = ndim;
-    out->dims = new_dims;
-    out->strides = new_strides;
-    out->size = total_size;
-    out->ref_count = src->ref_count;
-    if (out->ref_count)
-        (*(out->ref_count))++;
-    out->owns_dims_strides = 1;
+    // 8. 引用计数处理
+    dst->ref_count = src->ref_count;
+    if (dst->ref_count)
+    {
+        (*dst->ref_count)++;
+    }
 
-    free(step_arr);
+    // 9. 标记所有权
+    dst->owns_dims_strides = 1;
+
+    // 成功路径：释放临时步长数组 (dims/strides 已转移给 dst)
+    if (step_arr)
+        free(step_arr);
     return TENSOR_OK;
+
+cleanup_error:
+    // 错误路径：释放所有已分配资源
+    if (step_arr)
+        free(step_arr);
+    if (new_dims)
+        free(new_dims);
+    if (new_strides)
+        free(new_strides);
+    // 不修改 dst 内容，保持未定义状态
+    return TENSOR_ERR_INVALID_PARAM; // 或 TENSOR_ERR_MEMORY 视具体错误而定
 }
 
-/* ---------- 高级索引（整数数组） ---------- */
+/* ==================== 高级索引（整数数组） ==================== */
 
-/* 计算多个张量的广播形状，假设所有张量都是整数索引 */
+/**
+ * @brief 计算多个索引张量的广播形状
+ * @param indices 索引张量数组
+ * @param num_indices 索引张量个数
+ * @param out_dims 输出广播后形状数组（长度至少为最大维度）
+ * @param out_ndim 输出广播后维度数
+ * @return 1 表示可广播，0 表示不可广播
+ */
 static int broadcast_indices_shape(const Tensor **indices, int num_indices,
                                    int *out_dims, int *out_ndim)
 {
@@ -183,6 +279,14 @@ static int broadcast_indices_shape(const Tensor **indices, int num_indices,
     return 1;
 }
 
+/**
+ * @brief 整数数组索引（高级索引）
+ * @param src 源张量
+ * @param indices 索引张量数组，每个张量元素为整数（float 类型），形状需兼容
+ * @param num_indices 索引张量个数
+ * @param out 输出张量（新数据）
+ * @return TensorStatus
+ */
 TensorStatus tensor_advanced_index(const Tensor *src, const Tensor **indices, int num_indices,
                                    Tensor *out)
 {
@@ -225,7 +329,6 @@ TensorStatus tensor_advanced_index(const Tensor *src, const Tensor **indices, in
     util_get_effective_strides(src, src_strides);
 
     // 为每个索引张量准备 padded 步长（用于广播）
-    int *idx_padded_strides[TENSOR_MAX_DIM];
     int idx_eff_strides[TENSOR_MAX_DIM][TENSOR_MAX_DIM];
     for (int k = 0; k < num_indices; k++)
     {
@@ -244,17 +347,10 @@ TensorStatus tensor_advanced_index(const Tensor *src, const Tensor **indices, in
         // 前 num_indices 个维度由索引张量提供
         for (int d = 0; d < num_indices; d++)
         {
-            // 计算当前索引张量的坐标（从 out_coords 中取前 idx_ndim 个，但索引张量可能广播）
-            // 索引张量的形状为 idx_dims，out_coords 的前 idx_ndim 对应广播后的坐标
-            // 对于每个索引张量，我们需要从 out_coords 中提取对应广播维度的坐标
-            // 由于广播规则，索引张量的每个维度要么是1，要么等于 idx_dims 对应维度
-            // 我们需要根据索引张量的形状和步长来计算其元素值
             const Tensor *idx_t = indices[d];
             int idx_ndim_t = idx_t->ndim;
             // 计算索引张量的偏移：从 out_coords 的前 idx_ndim 中，取与 idx_t 维度对应的部分
-            size_t idx_off = 0;
-            int idx_coord[TENSOR_MAX_DIM];
-            // 对齐广播维度：索引张量的维度从后向前与 idx_dims 对齐
+            ptrdiff_t idx_off = 0;
             int offset = idx_ndim - idx_ndim_t;
             for (int i = 0; i < idx_ndim_t; i++)
             {
@@ -262,13 +358,13 @@ TensorStatus tensor_advanced_index(const Tensor *src, const Tensor **indices, in
                 // 如果 idx_t 该维度大小为1，则坐标应为0（广播）
                 if (idx_t->dims[i] == 1)
                     coord = 0;
-                idx_coord[i] = coord;
                 idx_off += coord * idx_eff_strides[d][i];
             }
-            int index_val = (int)idx_t->data[idx_off];
-            // 检查索引是否越界
-            if (index_val < 0 || index_val >= src->dims[d])
-                return TENSOR_ERR_INDEX_OUT_OF_BOUNDS;
+            float idx_float = idx_t->data[idx_off];
+            TensorStatus st;
+            int index_val = tensor_float_to_index(idx_float, src->dims[d], &st);
+            if (st != TENSOR_OK)
+                return st;
             src_coords[d] = index_val;
         }
         // 剩余维度直接从 out_coords 的后 rem_ndim 复制
@@ -276,9 +372,9 @@ TensorStatus tensor_advanced_index(const Tensor *src, const Tensor **indices, in
             src_coords[num_indices + d] = out_coords[idx_ndim + d];
 
         // 计算 src 偏移
-        size_t src_off = util_offset_from_coords(src_coords, src_strides, src->ndim);
+        ptrdiff_t src_off = util_offset_from_coords(src_coords, src_strides, src->ndim);
         // 计算 out 偏移
-        size_t out_off = util_offset_from_coords(out_coords, out_eff_strides, out_ndim);
+        ptrdiff_t out_off = util_offset_from_coords(out_coords, out_eff_strides, out_ndim);
 
         out->data[out_off] = src->data[src_off];
 
@@ -290,8 +386,15 @@ TensorStatus tensor_advanced_index(const Tensor *src, const Tensor **indices, in
     return TENSOR_OK;
 }
 
-/* ---------- 布尔掩码选择 ---------- */
+/* ==================== 布尔掩码选择 ==================== */
 
+/**
+ * @brief 布尔掩码选择
+ * @param src 源张量
+ * @param mask 布尔掩码张量（0.0/1.0），形状需与 src 相同
+ * @param out 输出1维张量（新数据）
+ * @return TensorStatus
+ */
 TensorStatus tensor_masked_select(const Tensor *src, const Tensor *mask, Tensor *out)
 {
     if (!src || !mask || !out)
@@ -317,7 +420,7 @@ TensorStatus tensor_masked_select(const Tensor *src, const Tensor *mask, Tensor 
     size_t count = 0;
     while (1)
     {
-        size_t mask_off = util_offset_from_coords(coords, mask_strides, ndim);
+        ptrdiff_t mask_off = util_offset_from_coords(coords, mask_strides, ndim);
         if (mask->data[mask_off] != 0.0f)
             count++;
         if (util_increment_coords(coords, src->dims, ndim))
@@ -333,8 +436,8 @@ TensorStatus tensor_masked_select(const Tensor *src, const Tensor *mask, Tensor 
     size_t out_idx = 0;
     while (1)
     {
-        size_t src_off = util_offset_from_coords(coords, src_strides, ndim);
-        size_t mask_off = util_offset_from_coords(coords, mask_strides, ndim);
+        ptrdiff_t src_off = util_offset_from_coords(coords, src_strides, ndim);
+        ptrdiff_t mask_off = util_offset_from_coords(coords, mask_strides, ndim);
         if (mask->data[mask_off] != 0.0f)
             out->data[out_idx++] = src->data[src_off];
         if (util_increment_coords(coords, src->dims, ndim))
@@ -343,8 +446,16 @@ TensorStatus tensor_masked_select(const Tensor *src, const Tensor *mask, Tensor 
     return TENSOR_OK;
 }
 
-/* ---------- 按索引赋值（支持广播） ---------- */
+/* ==================== 按索引赋值（支持广播） ==================== */
 
+/**
+ * @brief 按索引赋值（可能触发写时拷贝）
+ * @param dst 目标张量
+ * @param indices 索引张量数组，同 advanced_index
+ * @param num_indices 索引个数
+ * @param values 要赋值的张量，支持广播
+ * @return TensorStatus
+ */
 TensorStatus tensor_index_put(Tensor *dst, const Tensor **indices, int num_indices,
                               const Tensor *values)
 {
@@ -414,7 +525,7 @@ TensorStatus tensor_index_put(Tensor *dst, const Tensor **indices, int num_indic
         {
             const Tensor *idx_t = indices[d];
             int idx_ndim_t = idx_t->ndim;
-            size_t idx_off = 0;
+            ptrdiff_t idx_off = 0;
             int offset = idx_ndim - idx_ndim_t;
             for (int i = 0; i < idx_ndim_t; i++)
             {
@@ -423,16 +534,18 @@ TensorStatus tensor_index_put(Tensor *dst, const Tensor **indices, int num_indic
                     coord = 0;
                 idx_off += coord * idx_eff_strides[d][i];
             }
-            int index_val = (int)idx_t->data[idx_off];
-            if (index_val < 0 || index_val >= dst->dims[d])
-                return TENSOR_ERR_INDEX_OUT_OF_BOUNDS;
+            float idx_float = idx_t->data[idx_off];
+            TensorStatus st;
+            int index_val = tensor_float_to_index(idx_float, dst->dims[d], &st);
+            if (st != TENSOR_OK)
+                return st;
             dst_coords[d] = index_val;
         }
         for (int d = 0; d < rem_ndim; d++)
             dst_coords[num_indices + d] = target_coords[idx_ndim + d];
 
         // 计算 dst 偏移
-        size_t dst_off = util_offset_from_coords(dst_coords, dst_strides, dst->ndim);
+        ptrdiff_t dst_off = util_offset_from_coords(dst_coords, dst_strides, dst->ndim);
 
         // 计算 values 偏移
         size_t val_off = 0;
@@ -449,8 +562,16 @@ TensorStatus tensor_index_put(Tensor *dst, const Tensor **indices, int num_indic
     return TENSOR_OK;
 }
 
-/* ---------- gather ---------- */
+/* ==================== gather ==================== */
 
+/**
+ * @brief 沿指定轴收集元素
+ * @param src 源张量
+ * @param axis 收集轴
+ * @param index 索引张量（元素为整数 float），形状除 axis 外与 src 相同
+ * @param out 输出张量
+ * @return TensorStatus
+ */
 TensorStatus tensor_gather(const Tensor *src, int axis, const Tensor *index, Tensor *out)
 {
     if (!src || !index || !out)
@@ -495,18 +616,21 @@ TensorStatus tensor_gather(const Tensor *src, int axis, const Tensor *index, Ten
     while (1)
     {
         // 从 index 中读取索引值
-        size_t idx_off = util_offset_from_coords(coords, idx_strides, ndim);
-        int gather_idx = (int)index->data[idx_off];
-        if (gather_idx < 0 || gather_idx >= src->dims[ax])
-            return TENSOR_ERR_INDEX_OUT_OF_BOUNDS;
+        ptrdiff_t idx_off = util_offset_from_coords(coords, idx_strides, ndim);
+
+        float gather_float = index->data[idx_off];
+        TensorStatus st;
+        int gather_val = tensor_float_to_index(gather_float, src->dims[ax], &st);
+        if (st != TENSOR_OK)
+            return st;
 
         // 构造 src 坐标：除了 ax 维用 gather_idx，其他与 coords 相同
         int src_coords[TENSOR_MAX_DIM];
         memcpy(src_coords, coords, ndim * sizeof(int));
-        src_coords[ax] = gather_idx;
+        src_coords[ax] = gather_val;
 
-        size_t src_off = util_offset_from_coords(src_coords, src_strides, ndim);
-        size_t out_off = util_offset_from_coords(coords, out_strides, ndim);
+        ptrdiff_t src_off = util_offset_from_coords(src_coords, src_strides, ndim);
+        ptrdiff_t out_off = util_offset_from_coords(coords, out_strides, ndim);
         out->data[out_off] = src->data[src_off];
 
         // 递增坐标
@@ -517,8 +641,16 @@ TensorStatus tensor_gather(const Tensor *src, int axis, const Tensor *index, Ten
     return TENSOR_OK;
 }
 
-/* ---------- scatter ---------- */
+/* ==================== scatter ==================== */
 
+/**
+ * @brief 沿指定轴将 src 的值放入 dst 的索引位置
+ * @param dst 目标张量（可能触发写时拷贝）
+ * @param axis 轴
+ * @param index 索引张量
+ * @param src 源值张量
+ * @return TensorStatus
+ */
 TensorStatus tensor_scatter(Tensor *dst, int axis, const Tensor *index, const Tensor *src)
 {
     if (!dst || !index || !src)
@@ -553,21 +685,184 @@ TensorStatus tensor_scatter(Tensor *dst, int axis, const Tensor *index, const Te
     while (1)
     {
         // 从 index 中读取目标位置
-        size_t idx_off = util_offset_from_coords(coords, idx_strides, ndim);
-        int scatter_idx = (int)index->data[idx_off];
-        if (scatter_idx < 0 || scatter_idx >= dst->dims[ax])
-            return TENSOR_ERR_INDEX_OUT_OF_BOUNDS;
+        ptrdiff_t idx_off = util_offset_from_coords(coords, idx_strides, ndim);
+
+        float scatter_float = index->data[idx_off];
+        TensorStatus st;
+        int scatter_val = tensor_float_to_index(scatter_float, dst->dims[ax], &st);
+        if (st != TENSOR_OK)
+            return st;
 
         // 构造 dst 坐标：除了 ax 维用 scatter_idx，其他与 coords 相同
         int dst_coords[TENSOR_MAX_DIM];
         memcpy(dst_coords, coords, ndim * sizeof(int));
-        dst_coords[ax] = scatter_idx;
+        dst_coords[ax] = scatter_val;
 
-        size_t dst_off = util_offset_from_coords(dst_coords, dst_strides, ndim);
-        size_t src_off = util_offset_from_coords(coords, src_strides, ndim);
+        ptrdiff_t dst_off = util_offset_from_coords(dst_coords, dst_strides, ndim);
+        ptrdiff_t src_off = util_offset_from_coords(coords, src_strides, ndim);
         dst->data[dst_off] = src->data[src_off];
 
         // 递增坐标
+        if (util_increment_coords(coords, src->dims, ndim))
+            break;
+    }
+
+    return TENSOR_OK;
+}
+
+TensorStatus tensor_take(const Tensor *src, const Tensor *indices, Tensor *out)
+{
+    if (!src || !indices || !out)
+        return TENSOR_ERR_NULL_PTR;
+
+    // 输出形状必须与 indices 相同
+    if (out->ndim != indices->ndim || !util_shapes_equal(out->dims, indices->dims, indices->ndim))
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    TensorStatus status = tensor_make_unique(out);
+    if (status != TENSOR_OK)
+        return status;
+
+    int ndim = indices->ndim;
+    int idx_strides[TENSOR_MAX_DIM], out_strides[TENSOR_MAX_DIM];
+    util_get_effective_strides(indices, idx_strides);
+    util_get_effective_strides(out, out_strides);
+
+    // 源张量步长（用于将逻辑坐标转换为物理偏移）
+    int src_strides[TENSOR_MAX_DIM];
+    util_get_effective_strides(src, src_strides);
+
+    int coords[TENSOR_MAX_DIM] = {0};
+    while (1)
+    {
+        ptrdiff_t idx_off = util_offset_from_coords(coords, idx_strides, ndim);
+        float idx_float = indices->data[idx_off];
+
+        TensorStatus st;
+        int linear_idx = tensor_float_to_index(idx_float, (int)src->size, &st);
+        if (st != TENSOR_OK)
+            return st;
+
+        // 将线性索引转换为源张量的逻辑坐标
+        int src_coords[TENSOR_MAX_DIM];
+        util_coords_from_linear((size_t)linear_idx, src->dims, src->ndim, src_coords);
+
+        // 根据坐标和步长计算源张量物理偏移
+        ptrdiff_t src_off = util_offset_from_coords(src_coords, src_strides, src->ndim);
+
+        ptrdiff_t out_off = util_offset_from_coords(coords, out_strides, ndim);
+        out->data[out_off] = src->data[src_off];
+
+        if (util_increment_coords(coords, indices->dims, ndim))
+            break;
+    }
+    return TENSOR_OK;
+}
+
+TensorStatus tensor_put(Tensor *dst, const Tensor *indices, const Tensor *values, int accumulate)
+{
+    if (!dst || !indices || !values)
+        return TENSOR_ERR_NULL_PTR;
+
+    TensorStatus status = tensor_make_unique(dst);
+    if (status != TENSOR_OK)
+        return status;
+
+    // 检查 values 是否可以广播到 indices 的形状
+    int target_ndim;
+    int target_dims[TENSOR_MAX_DIM];
+    if (!util_broadcast_shape(values->dims, values->ndim, indices->dims, indices->ndim,
+                              target_dims, &target_ndim))
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    if (target_ndim != indices->ndim || !util_shapes_equal(target_dims, indices->dims, indices->ndim))
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    int ndim = indices->ndim;
+    int idx_strides[TENSOR_MAX_DIM], val_strides[TENSOR_MAX_DIM];
+    util_get_effective_strides(indices, idx_strides);
+    util_fill_padded_strides(values, ndim, indices->dims, val_strides);
+
+    int dst_strides[TENSOR_MAX_DIM];
+    util_get_effective_strides(dst, dst_strides);
+
+    int coords[TENSOR_MAX_DIM] = {0};
+    while (1)
+    {
+        ptrdiff_t idx_off = util_offset_from_coords(coords, idx_strides, ndim);
+        float idx_float = indices->data[idx_off];
+
+        TensorStatus st;
+        int linear_idx = tensor_float_to_index(idx_float, (int)dst->size, &st);
+        if (st != TENSOR_OK)
+            return st;
+
+        ptrdiff_t val_off = util_offset_from_coords(coords, val_strides, ndim);
+        float val = values->data[val_off];
+
+        // 将线性索引转换为目标张量的逻辑坐标
+        int dst_coords[TENSOR_MAX_DIM];
+        util_coords_from_linear((size_t)linear_idx, dst->dims, dst->ndim, dst_coords);
+
+        // 根据坐标和步长计算目标张量物理偏移
+        ptrdiff_t dst_off = util_offset_from_coords(dst_coords, dst_strides, dst->ndim);
+
+        if (accumulate)
+            dst->data[dst_off] += val;
+        else
+            dst->data[dst_off] = val;
+
+        if (util_increment_coords(coords, indices->dims, ndim))
+            break;
+    }
+    return TENSOR_OK;
+}
+
+TensorStatus tensor_nonzero(const Tensor *src, Tensor *out)
+{
+    if (!src || !out)
+        return TENSOR_ERR_NULL_PTR;
+
+    int ndim = src->ndim;
+    int src_strides[TENSOR_MAX_DIM];
+    util_get_effective_strides(src, src_strides);
+
+    // 第一遍：统计非零元素个数
+    int coords[TENSOR_MAX_DIM] = {0};
+    size_t count = 0;
+    while (1)
+    {
+        ptrdiff_t off = util_offset_from_coords(coords, src_strides, ndim);
+        if (src->data[off] != 0.0f)
+            count++;
+        if (util_increment_coords(coords, src->dims, ndim))
+            break;
+    }
+
+    if (out->ndim != 2 || out->dims[0] != (int)count || out->dims[1] != ndim)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    TensorStatus status = tensor_make_unique(out);
+    if (status != TENSOR_OK)
+        return status;
+
+    int out_strides[2];
+    util_get_effective_strides(out, out_strides);
+    size_t out_idx = 0;
+
+    memset(coords, 0, ndim * sizeof(int));
+    while (1)
+    {
+        ptrdiff_t off = util_offset_from_coords(coords, src_strides, ndim);
+        if (src->data[off] != 0.0f)
+        {
+            for (int d = 0; d < ndim; d++)
+            {
+                ptrdiff_t out_off = out_idx * out_strides[0] + d * out_strides[1];
+                out->data[out_off] = (float)coords[d];
+            }
+            out_idx++;
+        }
         if (util_increment_coords(coords, src->dims, ndim))
             break;
     }

@@ -5,8 +5,54 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <float.h>
+#include <limits.h>
+
+/**
+ * @file utils.c
+ * @brief 调试工具与内部通用辅助函数的实现
+ */
 
 /* ==================== 调试工具 ==================== */
+
+int tensor_float_to_index(float val, int dim_size, TensorStatus *status)
+{
+    // 检查 NaN/Inf
+    if (isnan(val) || isinf(val))
+    {
+        *status = TENSOR_ERR_INVALID_PARAM;
+        return -1;
+    }
+    // 检查是否为整数
+    if (val != floorf(val))
+    {
+        *status = TENSOR_ERR_INVALID_PARAM;
+        return -1;
+    }
+    // 检查是否超出 int 范围
+    if (val < (double)INT_MIN || val > (double)INT_MAX)
+    {
+        *status = TENSOR_ERR_INDEX_OUT_OF_BOUNDS;
+        return -1;
+    }
+
+    int idx = (int)val;
+
+    // 支持负索引：将 [-dim_size, -1] 映射到 [0, dim_size-1]
+    if (idx < 0)
+    {
+        idx += dim_size;
+    }
+
+    // 最终检查范围
+    if (idx < 0 || idx >= dim_size)
+    {
+        *status = TENSOR_ERR_INDEX_OUT_OF_BOUNDS;
+        return -1;
+    }
+
+    *status = TENSOR_OK;
+    return idx;
+}
 
 void tensor_print(const Tensor *t, const char *name, int max_elements)
 {
@@ -188,7 +234,7 @@ TensorStatus tensor_fill(Tensor *t, float value)
     int coords[TENSOR_MAX_DIM] = {0};
     while (1)
     {
-        size_t off = util_offset_from_coords(coords, strides, ndim);
+        ptrdiff_t off = util_offset_from_coords(coords, strides, ndim);
         t->data[off] = value;
         if (util_increment_coords(coords, t->dims, ndim))
             break;
@@ -213,7 +259,7 @@ TensorStatus tensor_normal_init(Tensor *t, float mean, float std)
     float spare;
     while (1)
     {
-        size_t off = util_offset_from_coords(coords, strides, ndim);
+        ptrdiff_t off = util_offset_from_coords(coords, strides, ndim);
         if (have_spare)
         {
             t->data[off] = mean + std * spare;
@@ -257,7 +303,7 @@ TensorStatus tensor_uniform_init(Tensor *t, float low, float high)
     int coords[TENSOR_MAX_DIM] = {0};
     while (1)
     {
-        size_t off = util_offset_from_coords(coords, strides, ndim);
+        ptrdiff_t off = util_offset_from_coords(coords, strides, ndim);
         float r = (float)rand() / RAND_MAX;
         t->data[off] = low + r * range;
         if (util_increment_coords(coords, t->dims, ndim))
@@ -271,6 +317,8 @@ TensorStatus tensor_xavier_init(Tensor *t, int fan_in, int fan_out)
     float scale = sqrtf(6.0f / (fan_in + fan_out));
     return tensor_uniform_init(t, -scale, scale);
 }
+
+/* ==================== 内部广播辅助 ==================== */
 
 int util_broadcast_shapes(const int *dims[], const int ndims[], int num_tensors,
                           int *out_dims, int *out_ndim)
@@ -373,9 +421,18 @@ void util_get_effective_strides(const Tensor *t, int *strides_out)
     }
 }
 
-size_t util_offset_from_coords(const int *coords, const int *strides, int ndim)
+int util_normalize_axis(int axis, int ndim)
 {
-    size_t off = 0;
+    if (axis < 0)
+        axis += ndim;
+    if (axis < 0 || axis >= ndim)
+        return -1;
+    return axis;
+}
+
+ptrdiff_t util_offset_from_coords(const int *coords, const int *strides, int ndim)
+{
+    ptrdiff_t off = 0;
     for (int i = 0; i < ndim; ++i)
         off += coords[i] * strides[i];
     return off;
@@ -383,7 +440,7 @@ size_t util_offset_from_coords(const int *coords, const int *strides, int ndim)
 
 /* ==================== 通用迭代器 ==================== */
 
-TensorStatus util_unary_op_general(const Tensor *x, Tensor *out, UnaryOp op)
+TensorStatus util_unary_op_general(const Tensor *x, Tensor *out, UnaryOp op, void *user_data)
 {
     if (!x || !out)
         return TENSOR_ERR_NULL_PTR;
@@ -406,13 +463,13 @@ TensorStatus util_unary_op_general(const Tensor *x, Tensor *out, UnaryOp op)
 
     while (1)
     {
-        size_t x_off = 0, out_off = 0;
+        ptrdiff_t x_off = 0, out_off = 0;
         for (int i = 0; i < ndim; ++i)
         {
-            x_off += coords[i] * x_strides[i];
-            out_off += coords[i] * out_strides[i];
+            x_off += (ptrdiff_t)coords[i] * x_strides[i];
+            out_off += (ptrdiff_t)coords[i] * out_strides[i];
         }
-        out->data[out_off] = op(x->data[x_off]);
+        out->data[out_off] = op(x->data[x_off], user_data);
         if (util_increment_coords(coords, x->dims, ndim))
             break;
     }
@@ -420,7 +477,7 @@ TensorStatus util_unary_op_general(const Tensor *x, Tensor *out, UnaryOp op)
 }
 
 TensorStatus util_binary_op_general(const Tensor *a, const Tensor *b,
-                                    Tensor *out, BinaryOp op)
+                                    Tensor *out, BinaryOp op, void *user_data)
 {
     if (!a || !b || !out)
         return TENSOR_ERR_NULL_PTR;
@@ -440,10 +497,6 @@ TensorStatus util_binary_op_general(const Tensor *a, const Tensor *b,
     if (status != TENSOR_OK)
         return status;
 
-    if (!util_broadcast_shape(a->dims, a->ndim, b->dims, b->ndim, out_dims, &out_ndim))
-        return TENSOR_ERR_SHAPE_MISMATCH;
-    // 验证 out 形状与原代码相同（略）
-
     // 获取广播后的步长
     int a_strides[TENSOR_MAX_DIM], b_strides[TENSOR_MAX_DIM], out_strides[TENSOR_MAX_DIM];
     util_fill_padded_strides(a, out_ndim, out_dims, a_strides);
@@ -456,9 +509,6 @@ TensorStatus util_binary_op_general(const Tensor *a, const Tensor *b,
     {
         // 输出连续，采用一维线性遍历
         size_t total = out->size;
-        // 预先计算每个输入的“扁平化”步长？实际上，对于连续输出，我们可以直接按线性顺序遍历，
-        // 但输入偏移量需要根据当前线性索引对应的坐标来计算。
-        // 为了快速从线性索引得到坐标，可以预先计算每个维度的累乘因子。
         int stride_mult[TENSOR_MAX_DIM]; // 每个维度上的累乘因子，用于从线性索引提取坐标
         stride_mult[out_ndim - 1] = 1;
         for (int i = out_ndim - 2; i >= 0; --i)
@@ -477,13 +527,13 @@ TensorStatus util_binary_op_general(const Tensor *a, const Tensor *b,
                 rem %= stride_mult[i];
             }
             // 计算各输入偏移
-            size_t a_off = 0, b_off = 0;
+            ptrdiff_t a_off = 0, b_off = 0;
             for (int i = 0; i < out_ndim; ++i)
             {
                 a_off += coords[i] * a_strides[i];
                 b_off += coords[i] * b_strides[i];
             }
-            out->data[idx] = op(a->data[a_off], b->data[b_off]);
+            out->data[idx] = op(a->data[a_off], b->data[b_off], user_data);
         }
     }
     else
@@ -492,14 +542,14 @@ TensorStatus util_binary_op_general(const Tensor *a, const Tensor *b,
         int coords[TENSOR_MAX_DIM] = {0};
         while (1)
         {
-            size_t a_off = 0, b_off = 0, out_off = 0;
+            ptrdiff_t a_off = 0, b_off = 0, out_off = 0;
             for (int i = 0; i < out_ndim; ++i)
             {
-                a_off += coords[i] * a_strides[i];
-                b_off += coords[i] * b_strides[i];
-                out_off += coords[i] * out_strides[i];
+                a_off += (ptrdiff_t)coords[i] * a_strides[i];
+                b_off += (ptrdiff_t)coords[i] * b_strides[i];
+                out_off += (ptrdiff_t)coords[i] * out_strides[i];
             }
-            out->data[out_off] = op(a->data[a_off], b->data[b_off]);
+            out->data[out_off] = op(a->data[a_off], b->data[b_off], user_data);
             if (util_increment_coords(coords, out_dims, out_ndim))
                 break;
         }
@@ -508,7 +558,7 @@ TensorStatus util_binary_op_general(const Tensor *a, const Tensor *b,
 }
 
 TensorStatus util_ternary_op_general(const Tensor *a, const Tensor *b,
-                                     const Tensor *c, Tensor *out, TernaryOp op)
+                                     const Tensor *c, Tensor *out, TernaryOp op, void *user_data)
 {
     if (!a || !b || !c || !out)
         return TENSOR_ERR_NULL_PTR;
@@ -545,15 +595,15 @@ TensorStatus util_ternary_op_general(const Tensor *a, const Tensor *b,
 
     while (1)
     {
-        size_t a_off = 0, b_off = 0, c_off = 0, out_off = 0;
+        ptrdiff_t a_off = 0, b_off = 0, c_off = 0, out_off = 0;
         for (int i = 0; i < out_ndim; ++i)
         {
-            a_off += coords[i] * a_strides[i];
-            b_off += coords[i] * b_strides[i];
-            c_off += coords[i] * c_strides[i];
-            out_off += coords[i] * out_strides[i];
+            a_off += (ptrdiff_t)coords[i] * a_strides[i];
+            b_off += (ptrdiff_t)coords[i] * b_strides[i];
+            c_off += (ptrdiff_t)coords[i] * c_strides[i];
+            out_off += (ptrdiff_t)coords[i] * out_strides[i];
         }
-        out->data[out_off] = op(a->data[a_off], b->data[b_off], c->data[c_off]);
+        out->data[out_off] = op(a->data[a_off], b->data[b_off], c->data[c_off], user_data);
         if (util_increment_coords(coords, out_dims, out_ndim))
             break;
     }
@@ -561,7 +611,7 @@ TensorStatus util_ternary_op_general(const Tensor *a, const Tensor *b,
 }
 
 TensorStatus util_binary_op_scalar(const Tensor *a, float scalar,
-                                   Tensor *out, BinaryOp op)
+                                   Tensor *out, BinaryOp op, void *user_data)
 {
     Tensor scalar_tensor;
     scalar_tensor.data = &scalar;
@@ -571,8 +621,9 @@ TensorStatus util_binary_op_scalar(const Tensor *a, float scalar,
     scalar_tensor.size = 1;
     scalar_tensor.ref_count = NULL;
     scalar_tensor.owns_dims_strides = 0;
-    return util_binary_op_general(a, &scalar_tensor, out, op);
+    return util_binary_op_general(a, &scalar_tensor, out, op, user_data);
 }
+
 TensorStatus util_generate_op(Tensor *t, float (*gen)(void *), void *user_data)
 {
     if (!t || !gen)
@@ -598,7 +649,7 @@ TensorStatus util_generate_op(Tensor *t, float (*gen)(void *), void *user_data)
 
     while (1)
     {
-        size_t off = util_offset_from_coords(coords, strides, ndim);
+        ptrdiff_t off = util_offset_from_coords(coords, strides, ndim);
         t->data[off] = gen(user_data);
 
         if (util_increment_coords(coords, dims, ndim))
@@ -606,7 +657,9 @@ TensorStatus util_generate_op(Tensor *t, float (*gen)(void *), void *user_data)
     }
     return TENSOR_OK;
 }
-/* 检查张量是否连续（行主序） */
+
+/* ==================== 内部实用函数 ==================== */
+
 int util_is_contiguous(const Tensor *t)
 {
     if (!t)
@@ -625,7 +678,6 @@ int util_is_contiguous(const Tensor *t)
     return 1;
 }
 
-/* 复制整数数组 */
 int *util_copy_ints(const int *src, int n)
 {
     if (n <= 0)
@@ -636,7 +688,6 @@ int *util_copy_ints(const int *src, int n)
     return dst;
 }
 
-/* 计算连续存储的步长（行主序） */
 int *util_calc_contiguous_strides(const int *dims, int ndim)
 {
     if (ndim == 0)
@@ -650,7 +701,6 @@ int *util_calc_contiguous_strides(const int *dims, int ndim)
     return strides;
 }
 
-/* 计算元素总数 */
 size_t util_calc_size(const int *dims, int ndim)
 {
     if (ndim <= 0)
@@ -660,22 +710,13 @@ size_t util_calc_size(const int *dims, int ndim)
         size *= dims[i];
     return size;
 }
-/* 检查两个形状是否相等 */
+
 int util_shapes_equal(const int *a, const int *b, int ndim)
 {
     for (int i = 0; i < ndim; ++i)
         if (a[i] != b[i])
             return 0;
     return 1;
-}
-/* 归一化轴索引（支持负索引） */
-int util_normalize_axis(int axis, int ndim)
-{
-    if (axis < 0)
-        axis += ndim;
-    if (axis < 0 || axis >= ndim)
-        return -1;
-    return axis;
 }
 
 int util_increment_coords(int *coords, const int *dims, int ndim)
@@ -726,7 +767,7 @@ void util_clear_tensor(Tensor *t)
     int coords[TENSOR_MAX_DIM] = {0};
     while (1)
     {
-        size_t off = util_offset_from_coords(coords, strides, ndim);
+        ptrdiff_t off = util_offset_from_coords(coords, strides, ndim);
         t->data[off] = 0.0f;
         if (util_increment_coords(coords, t->dims, ndim))
             break;
@@ -765,7 +806,7 @@ void tensor_print_logical(const Tensor *t, const char *name, int max_elements)
     printf("[");
     while (printed < n)
     {
-        size_t off = util_offset_from_coords(coords, strides, ndim);
+        ptrdiff_t off = util_offset_from_coords(coords, strides, ndim);
         if (printed > 0)
             printf(", ");
         printf("%g", t->data[off]);
@@ -776,4 +817,145 @@ void tensor_print_logical(const Tensor *t, const char *name, int max_elements)
     if (printed < t->size)
         printf(", ...");
     printf("]\n");
+}
+
+/* ==================== 数值算法辅助 ==================== */
+
+void util_random_double_vector(double *v, int len)
+{
+    for (int i = 0; i < len; ++i)
+    {
+        v[i] = 2.0 * rand() / RAND_MAX - 1.0;
+    }
+}
+
+/**
+ * 高精度 LU 分解：使用 double 进行累积计算
+ */
+int util_lu_decompose(const float *A, int n, float *LU, int *pivot)
+{
+    double *a = (double *)malloc(n * n * sizeof(double));
+    if (!a)
+        return -1;
+    for (int i = 0; i < n * n; ++i)
+        a[i] = A[i];
+
+    const double eps = 1e-12;
+
+    for (int k = 0; k < n; ++k)
+    {
+        int p = k;
+        double max_val = fabs(a[k * n + k]);
+        for (int i = k + 1; i < n; ++i)
+        {
+            double val = fabs(a[i * n + k]);
+            if (val > max_val)
+            {
+                max_val = val;
+                p = i;
+            }
+        }
+        if (max_val < eps)
+        {
+            free(a);
+            return -1;
+        }
+        pivot[k] = p;
+        if (p != k)
+        {
+            for (int j = 0; j < n; ++j)
+            {
+                double tmp = a[k * n + j];
+                a[k * n + j] = a[p * n + j];
+                a[p * n + j] = tmp;
+            }
+        }
+
+        double inv_pivot = 1.0 / a[k * n + k];
+        for (int i = k + 1; i < n; ++i)
+        {
+            double factor = a[i * n + k] * inv_pivot;
+            a[i * n + k] = factor;
+            for (int j = k + 1; j < n; ++j)
+            {
+                a[i * n + j] -= factor * a[k * n + j];
+            }
+        }
+    }
+
+    // 将结果写回 LU（float）
+    for (int i = 0; i < n * n; ++i)
+        LU[i] = (float)a[i];
+    free(a);
+    return 0;
+}
+
+/**
+ * 高精度求解：使用 double 计算，结果存入 float 数组 x
+ */
+TensorStatus util_lu_solve(const float *LU, int n, const int *pivot, const float *b, float *x)
+{
+    double *a = (double *)malloc(n * n * sizeof(double));
+    double *pb = (double *)malloc(n * sizeof(double));
+    double *y = (double *)malloc(n * sizeof(double));
+    double *xx = (double *)malloc(n * sizeof(double));
+
+    if (!a || !pb || !y || !xx)
+    {
+        free(a); // free(NULL) 安全
+        free(pb);
+        free(y);
+        free(xx);
+        return TENSOR_ERR_MEMORY;
+    }
+
+    // 将 LU 和 b 转换为 double 数组
+    for (int i = 0; i < n * n; ++i)
+        a[i] = LU[i];
+    for (int i = 0; i < n; ++i)
+        pb[i] = b[i];
+
+    // 应用行置换
+    for (int i = 0; i < n; ++i)
+    {
+        if (pivot[i] != i)
+        {
+            double tmp = pb[i];
+            pb[i] = pb[pivot[i]];
+            pb[pivot[i]] = tmp;
+        }
+    }
+
+    // 前代解 L y = Pb
+    y[0] = pb[0];
+    for (int i = 1; i < n; ++i)
+    {
+        double sum = 0.0;
+        for (int j = 0; j < i; ++j)
+        {
+            sum += a[i * n + j] * y[j];
+        }
+        y[i] = pb[i] - sum;
+    }
+
+    // 回代解 U x = y
+    for (int i = n - 1; i >= 0; --i)
+    {
+        double sum = 0.0;
+        for (int j = i + 1; j < n; ++j)
+        {
+            sum += a[i * n + j] * xx[j];
+        }
+        xx[i] = (y[i] - sum) / a[i * n + i];
+    }
+
+    // 结果写回 x
+    for (int i = 0; i < n; ++i)
+        x[i] = (float)xx[i];
+
+    free(a);
+    free(pb);
+    free(y);
+    free(xx);
+    return TENSOR_OK;
 }

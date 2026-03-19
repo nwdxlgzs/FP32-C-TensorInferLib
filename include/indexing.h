@@ -19,6 +19,8 @@ extern "C"
      * @param indices 索引数组，长度等于 src 的维度
      * @param out_value 输出值
      * @return TensorStatus
+     * @retval TENSOR_OK 成功
+     * @retval TENSOR_ERR_INDEX_OUT_OF_BOUNDS 索引越界
      */
     TensorStatus tensor_get_item(const Tensor *src, const int *indices, float *out_value);
 
@@ -37,11 +39,11 @@ extern "C"
      * @param starts 每个轴的起始索引
      * @param ends 每个轴的结束索引（不包含）
      * @param steps 每个轴的步长，为 NULL 则步长为1
-     * @param out 输出张量（视图）
+     * @param dst 输出张量（视图）
      * @return TensorStatus
      */
-    TensorStatus tensor_get_slice(const Tensor *src, const int *starts, const int *ends,
-                                  const int *steps, Tensor *out);
+    TensorStatus tensor_slice(const Tensor *src, const int *starts, const int *ends,
+                              const int *steps, Tensor *dst);
 
     /**
      * @brief 整数数组索引（高级索引）
@@ -94,6 +96,32 @@ extern "C"
      */
     TensorStatus tensor_scatter(Tensor *dst, int axis, const Tensor *index, const Tensor *src);
 
+    /**
+     * @brief 根据线性索引取值（扁平 take）
+     * @param src 源张量
+     * @param indices 索引张量，元素为整数（float 类型）
+     * @param out 输出张量，形状与 indices 相同
+     * @return TensorStatus
+     */
+    TensorStatus tensor_take(const Tensor *src, const Tensor *indices, Tensor *out);
+
+    /**
+     * @brief 根据线性索引赋值（扁平 put）
+     * @param dst 目标张量（可能触发写时拷贝）
+     * @param indices 索引张量，元素为整数（float 类型）
+     * @param values 值张量，支持广播到 indices 的形状
+     * @param accumulate 非零表示累加，零表示覆盖
+     * @return TensorStatus
+     */
+    TensorStatus tensor_put(Tensor *dst, const Tensor *indices, const Tensor *values, int accumulate);
+
+    /**
+     * @brief 返回非零元素的索引
+     * @param src 源张量
+     * @param out 输出二维张量，形状 (num_nonzero, ndim)
+     * @return TensorStatus
+     */
+    TensorStatus tensor_nonzero(const Tensor *src, Tensor *out);
 #ifdef __cplusplus
 }
 #endif

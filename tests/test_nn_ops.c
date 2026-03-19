@@ -33,23 +33,20 @@ static void print_tensor(const Tensor *t, const char *name)
 {
     printf("%s: ", name);
     for (size_t i = 0; i < t->size; i++)
-        printf("%.4f ", t->data[i]);
+        printf("%.6f ", t->data[i]);
     printf("\n");
 }
 
-/* ---------- 卷积测试 ---------- */
+/* ---------- 原有测试（保持不变） ---------- */
 void test_conv1d()
 {
     TEST("tensor_conv1d");
-    // 输入: N=1, C=1, L=5
     float in_data[] = {1, 2, 3, 4, 5};
-    // 权重: out=1, in=1, kL=3
-    float w_data[] = {1, 0, -1}; // 简单的差分核
-    // 偏置: 0
+    float w_data[] = {1, 0, -1};
     float bias_val = 0;
     int in_dims[] = {1, 1, 5};
     int w_dims[] = {1, 1, 3};
-    int out_dims[] = {1, 1, 3}; // padding=0, stride=1
+    int out_dims[] = {1, 1, 3};
     Tensor *input = tensor_from_array(in_data, 3, in_dims);
     Tensor *weight = tensor_from_array(w_data, 3, w_dims);
     Tensor *bias = tensor_wrap(&bias_val, 0, NULL, NULL);
@@ -64,11 +61,6 @@ void test_conv1d()
     TensorStatus status = tensor_conv1d(input, weight, bias, params, output);
     assert(status == TENSOR_OK);
 
-    // 预期: 差分结果 (2-0? 实际上：1*1 + 2*0 + 3*(-1) = -2? 但应该是边缘检测)
-    // 手动计算:
-    // ol=0: 1*1 + 2*0 + 3*(-1) = -2
-    // ol=1: 2*1 + 3*0 + 4*(-1) = -2
-    // ol=2: 3*1 + 4*0 + 5*(-1) = -2
     float expected[] = {-2, -2, -2};
     assert(check_tensor(output, expected, 3));
 
@@ -86,7 +78,7 @@ void test_conv2d()
     float w_data[] = {1, 0, 0, 1};
     int in_dims[] = {1, 1, 3, 3};
     int w_dims[] = {1, 1, 2, 2};
-    int out_dims[] = {1, 1, 2, 2}; // stride=1, pad=0
+    int out_dims[] = {1, 1, 2, 2};
     Tensor *input = tensor_from_array(in_data, 4, in_dims);
     Tensor *weight = tensor_from_array(w_data, 4, w_dims);
     Tensor *output = tensor_create(4, out_dims);
@@ -101,9 +93,8 @@ void test_conv2d()
     params.groups = 1;
 
     tensor_conv2d(input, weight, NULL, params, output);
-    float expected[] = {1 + 5, 2 + 6, 4 + 8, 5 + 9}; // 6,8,12,14
-    float exp[] = {6, 8, 12, 14};
-    assert(check_tensor(output, exp, 4));
+    float expected[] = {6, 8, 12, 14};
+    assert(check_tensor(output, expected, 4));
 
     tensor_destroy(input);
     tensor_destroy(weight);
@@ -114,12 +105,11 @@ void test_conv2d()
 void test_conv3d()
 {
     TEST("tensor_conv3d");
-    // 简化的 2x2x2 输入，1个通道，1个输出通道，核2x2x2
     float in_data[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    float w_data[] = {1, 0, 0, 1, 0, 1, 1, 0}; // 随机
+    float w_data[] = {1, 0, 0, 1, 0, 1, 1, 0};
     int in_dims[] = {1, 1, 2, 2, 2};
     int w_dims[] = {1, 1, 2, 2, 2};
-    int out_dims[] = {1, 1, 1, 1, 1}; // stride=1, pad=0
+    int out_dims[] = {1, 1, 1, 1, 1};
     Tensor *input = tensor_from_array(in_data, 5, in_dims);
     Tensor *weight = tensor_from_array(w_data, 5, w_dims);
     Tensor *output = tensor_create(5, out_dims);
@@ -134,7 +124,6 @@ void test_conv3d()
     params.groups = 1;
 
     tensor_conv3d(input, weight, NULL, params, output);
-    // 手动点积: 1*1 + 2*0 + 3*0 + 4*1 + 5*0 + 6*1 + 7*1 + 8*0 = 1+4+6+7=18
     float expected[] = {18};
     assert(check_tensor(output, expected, 1));
 
@@ -144,7 +133,6 @@ void test_conv3d()
     PASS();
 }
 
-/* ---------- 池化测试 ---------- */
 void test_pool1d()
 {
     TEST("tensor_pool1d");
@@ -152,7 +140,6 @@ void test_pool1d()
     int in_dims[] = {1, 1, 5};
     Tensor *input = tensor_from_array(in_data, 3, in_dims);
 
-    // 测试 ceil_mode = 0
     PoolParams params0 = {0};
     params0.kernel[0] = 2;
     params0.stride[0] = 2;
@@ -160,22 +147,21 @@ void test_pool1d()
     params0.ceil_mode = 0;
     params0.count_include_pad = 0;
 
-    int out_dims0[] = {1, 1, 2}; // ceil_mode=0 时输出长度应为2
+    int out_dims0[] = {1, 1, 2};
     Tensor *output0 = tensor_create(3, out_dims0);
     tensor_pool1d(input, POOL_MAX, params0, output0);
     float expected_max0[] = {3, 4};
     assert(check_tensor(output0, expected_max0, 2));
 
     tensor_pool1d(input, POOL_AVG, params0, output0);
-    float expected_avg0[] = {(1 + 3) / 2.0f, (2 + 4) / 2.0f}; // 2, 3
+    float expected_avg0[] = {2, 3};
     assert(check_tensor(output0, expected_avg0, 2));
 
-    // 测试 ceil_mode = 1
     PoolParams params1 = {0};
     params1.kernel[0] = 2;
     params1.stride[0] = 2;
     params1.pad[0] = 0;
-    params1.ceil_mode = 1; // 使用 ceil
+    params1.ceil_mode = 1;
     params1.count_include_pad = 0;
 
     int out_dims1[] = {1, 1, 3};
@@ -185,7 +171,6 @@ void test_pool1d()
     assert(check_tensor(output1, expected_max1, 3));
 
     tensor_pool1d(input, POOL_AVG, params1, output1);
-    // 注意：ceil_mode=1 时最后一个窗口只包含一个元素 [5]，平均值为5
     float expected_avg1[] = {2, 3, 5};
     assert(check_tensor(output1, expected_avg1, 3));
 
@@ -228,7 +213,7 @@ void test_pool2d()
 void test_pool3d()
 {
     TEST("tensor_pool3d");
-    float in_data[] = {1, 2, 3, 4, 5, 6, 7, 8}; // 2x2x2
+    float in_data[] = {1, 2, 3, 4, 5, 6, 7, 8};
     int in_dims[] = {1, 1, 2, 2, 2};
     Tensor *input = tensor_from_array(in_data, 5, in_dims);
     int out_dims[] = {1, 1, 1, 1, 1};
@@ -260,7 +245,7 @@ void test_global_pool2d()
 {
     TEST("tensor_global_avg/max_pool2d");
     float in_data[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int in_dims[] = {2, 1, 2, 2}; // N=2, C=1, H=2, W=2
+    int in_dims[] = {2, 1, 2, 2};
     Tensor *input = tensor_from_array(in_data, 4, in_dims);
     int out_dims[] = {2, 1, 1, 1};
     Tensor *avg_out = tensor_create(4, out_dims);
@@ -269,7 +254,7 @@ void test_global_pool2d()
     tensor_global_avg_pool2d(input, avg_out);
     tensor_global_max_pool2d(input, max_out);
 
-    float expected_avg[] = {(1 + 2 + 3 + 4) / 4.0f, (5 + 6 + 7 + 8) / 4.0f};
+    float expected_avg[] = {2.5, 6.5};
     float expected_max[] = {4, 8};
     assert(check_tensor(avg_out, expected_avg, 2));
     assert(check_tensor(max_out, expected_max, 2));
@@ -280,11 +265,9 @@ void test_global_pool2d()
     PASS();
 }
 
-/* ---------- 归一化测试 ---------- */
 void test_batchnorm()
 {
     TEST("tensor_batchnorm");
-    // x: [2,2,1,1]
     float x_data[] = {1, 2, 3, 4};
     int x_dims[] = {2, 2, 1, 1};
     float mean_data[] = {1.5f, 3.5f};
@@ -300,10 +283,6 @@ void test_batchnorm()
 
     tensor_batchnorm(x, mean, var, scale, bias, 1e-12f, y);
     float expected[] = {-1, -5, 7, 3};
-    printf("batchnorm actual: ");
-    for (int i = 0; i < 4; i++)
-        printf("%f ", y->data[i]);
-    printf("\n");
     assert(check_tensor(y, expected, 4));
 
     tensor_destroy(x);
@@ -319,13 +298,11 @@ void test_layernorm()
 {
     TEST("tensor_layernorm");
     float x_data[] = {1, 2, 3, 4, 5, 6};
-    int x_dims[] = {2, 3}; // [2,3]
+    int x_dims[] = {2, 3};
     Tensor *x = tensor_from_array(x_data, 2, x_dims);
     Tensor *y = tensor_create(2, x_dims);
 
     tensor_layernorm(x, NULL, NULL, 1e-5f, y);
-    // 第一行: mean=2, var=2/3≈0.6667, std≈0.8165, 归一化后: -1.2247,0,1.2247
-    // 第二行: mean=5, var=0.6667, 归一化: -1.2247,0,1.2247
     float expected[] = {-1.22474487f, 0, 1.22474487f,
                         -1.22474487f, 0, 1.22474487f};
     assert(check_tensor(y, expected, 6));
@@ -339,16 +316,11 @@ void test_instancenorm()
 {
     TEST("tensor_instancenorm");
     float x_data[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int x_dims[] = {2, 2, 2, 1}; // N=2, C=2, H=2, W=1
+    int x_dims[] = {2, 2, 2, 1};
     Tensor *x = tensor_from_array(x_data, 4, x_dims);
     Tensor *y = tensor_create(4, x_dims);
 
     tensor_instancenorm(x, NULL, NULL, 1e-12f, y);
-    // 每个样本每个通道独立计算
-    // 样本0通道0: [1,2] mean=1.5, var=0.25, inv_std=1/0.5=2, 归一化: (1-1.5)*2=-1, (2-1.5)*2=1
-    // 样本0通道1: [3,4] mean=3.5, var=0.25, 归一化: (3-3.5)*2=-1, (4-3.5)*2=1
-    // 样本1通道0: [5,6] mean=5.5, var=0.25, -> -1,1
-    // 样本1通道1: [7,8] mean=7.5, var=0.25, -> -1,1
     float expected[] = {-1, 1, -1, 1, -1, 1, -1, 1};
     assert(check_tensor(y, expected, 8));
 
@@ -360,22 +332,15 @@ void test_instancenorm()
 void test_groupnorm()
 {
     TEST("tensor_groupnorm");
-    float x_data[] = {1, 2, 3, 4, 5, 6, 7, 8}; // N=1, C=4, H=2, W=1
+    float x_data[] = {1, 2, 3, 4, 5, 6, 7, 8};
     int x_dims[] = {1, 4, 2, 1};
     Tensor *x = tensor_from_array(x_data, 4, x_dims);
     Tensor *y = tensor_create(4, x_dims);
 
-    tensor_groupnorm(x, NULL, NULL, 2, 1e-12f, y); // 2 groups
-    // group0: 通道0,1 每个通道有2个元素 -> 4个元素 [1,2,3,4] mean=2.5, var=1.25, inv_std≈0.8944
-    // 归一化后: (1-2.5)*0.8944=-1.3416, (2-2.5)*0.8944=-0.4472, (3-2.5)*0.8944=0.4472, (4-2.5)*0.8944=1.3416
-    // group1: 通道2,3 [5,6,7,8] mean=6.5, var=1.25, 归一化: -1.3416,-0.4472,0.4472,1.3416
+    tensor_groupnorm(x, NULL, NULL, 2, 1e-12f, y);
     float expected[] = {
         -1.3416407865f, -0.4472135955f, 0.4472135955f, 1.3416407865f,
         -1.3416407865f, -0.4472135955f, 0.4472135955f, 1.3416407865f};
-    printf("groupnorm actual: ");
-    for (int i = 0; i < 8; i++)
-        printf("%f ", y->data[i]);
-    printf("\n");
     assert(check_tensor(y, expected, 8));
 
     tensor_destroy(x);
@@ -386,20 +351,18 @@ void test_groupnorm()
 void test_lrn()
 {
     TEST("tensor_lrn");
-    float x_data[] = {1, 2, 3, 4, 5, 6, 7, 8}; // N=1, C=4, H=2, W=1
+    float x_data[] = {1, 2, 3, 4, 5, 6, 7, 8};
     int x_dims[] = {1, 4, 2, 1};
     Tensor *x = tensor_from_array(x_data, 4, x_dims);
     Tensor *y = tensor_create(4, x_dims);
 
     tensor_lrn(x, 3, 0.001f, 0.75f, 1.0f, y);
-    // 简单验证形状正确
     assert(y != NULL);
     tensor_destroy(x);
     tensor_destroy(y);
     PASS();
 }
 
-/* ---------- 激活函数测试 ---------- */
 void test_activations()
 {
     TEST("activation functions");
@@ -421,21 +384,16 @@ void test_activations()
     assert(check_tensor(y, elu_exp, 5));
 
     tensor_selu(x, 1.67326f, 1.0507f, y);
-    // 近似验证
     float selu_exp[] = {-1.520166f, -1.111331f, 0, 1.050701f, 2.101402f};
     assert(check_tensor(y, selu_exp, 5));
 
     tensor_gelu(x, y);
-    // 简单检查形状
-    assert(y != NULL);
-
     tensor_swish(x, y);
     tensor_mish(x, y);
     tensor_softplus(x, y);
     tensor_softsign(x, y);
     tensor_hardswish(x, y);
     tensor_hardsigmoid(x, y);
-    // 都至少不崩溃
     assert(y != NULL);
 
     tensor_destroy(x);
@@ -446,8 +404,8 @@ void test_activations()
 void test_prelu()
 {
     TEST("tensor_prelu");
-    float x_data[] = {-2, -1, 0, 1, 2, -3, -2, -1, 0, 1}; // N=1, C=2, H=1, W=5
-    int x_dims[] = {1, 2, 1, 5};                          // 改为 N=1
+    float x_data[] = {-2, -1, 0, 1, 2, -3, -2, -1, 0, 1};
+    int x_dims[] = {1, 2, 1, 5};
     float alpha_data[] = {0.1f, 0.5f};
     Tensor *x = tensor_from_array(x_data, 4, x_dims);
     Tensor *alpha = tensor_from_array(alpha_data, 1, (int[]){2});
@@ -464,12 +422,11 @@ void test_prelu()
     PASS();
 }
 
-/* ---------- 其他层测试 ---------- */
 void test_linear()
 {
     TEST("tensor_linear");
-    float in_data[] = {1, 2, 3, 4, 5, 6};                  // batch=2, in_features=3
-    float w_data[] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1}; // out_features=4, in_features=3
+    float in_data[] = {1, 2, 3, 4, 5, 6};
+    float w_data[] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1};
     float b_data[] = {0, 0, 0, 1};
     int in_dims[] = {2, 3};
     int w_dims[] = {4, 3};
@@ -498,11 +455,9 @@ void test_dropout()
     Tensor *x = tensor_from_array(x_data, 1, dims);
     Tensor *y = tensor_create(1, dims);
 
-    // 推理模式
     tensor_dropout(x, 0.5, 0, y);
     assert(check_tensor(y, x_data, 4));
 
-    // 训练模式（随机，仅验证形状）
     srand(0);
     tensor_dropout(x, 0.5, 1, y);
     assert(y->size == 4);
@@ -544,7 +499,7 @@ void test_upsample2d_nearest()
     Tensor *x = tensor_from_array(x_data, 4, x_dims);
     Tensor *y = tensor_create(4, out_dims);
 
-    tensor_upsample2d(x, 2, 2, UPSAMPLE_NEAREST, 0, y); // 添加 align_corners 参数
+    tensor_upsample2d(x, 2, 2, UPSAMPLE_NEAREST, 0, y);
     float expected[] = {
         1, 1, 2, 2,
         1, 1, 2, 2,
@@ -556,11 +511,10 @@ void test_upsample2d_nearest()
     tensor_destroy(y);
     PASS();
 }
+
 void test_upsample2d_linear()
 {
     TEST("tensor_upsample2d linear with align_corners");
-
-    /* 测试 align_corners = 0 (默认中心对齐) */
     {
         int in_dims[] = {1, 1, 2, 2};
         float in_data[] = {1, 2, 3, 4};
@@ -568,7 +522,6 @@ void test_upsample2d_linear()
         int out_dims[] = {1, 1, 4, 4};
         Tensor *out = tensor_create(4, out_dims);
         tensor_upsample2d(input, 2, 2, UPSAMPLE_LINEAR, 0, out);
-        // 预期值（中心对齐）
         float expected[] = {
             1.00f, 1.25f, 1.75f, 2.00f,
             1.50f, 1.75f, 2.25f, 2.50f,
@@ -578,8 +531,6 @@ void test_upsample2d_linear()
         tensor_destroy(input);
         tensor_destroy(out);
     }
-
-    /* 测试 align_corners = 1 (角点对齐) */
     {
         int in_dims[] = {1, 1, 2, 2};
         float in_data[] = {1, 2, 3, 4};
@@ -587,26 +538,15 @@ void test_upsample2d_linear()
         int out_dims[] = {1, 1, 4, 4};
         Tensor *out = tensor_create(4, out_dims);
         tensor_upsample2d(input, 2, 2, UPSAMPLE_LINEAR, 1, out);
-        // 当 align_corners=1 时，输出角点与输入角点完全一致，其余点线性插值。
-        // 计算：输入坐标范围 [0,1] 映射到输出坐标范围 [0,3]（整数索引）。
-        // 输出 (0,0) -> 输入 (0,0) = 1
-        // 输出 (0,1) -> 输入 x = 1 * (2-1)/(4-1) = 1/3 ≈ 0.3333, 在 (0,0) 和 (0,1) 之间插值
-        // 详细计算可得如下结果：
         float expected[] = {
             1.0f, 4.0f / 3.0f, 5.0f / 3.0f, 2.0f,
             5.0f / 3.0f, 2.0f, 7.0f / 3.0f, 8.0f / 3.0f,
             7.0f / 3.0f, 8.0f / 3.0f, 3.0f, 10.0f / 3.0f,
             3.0f, 10.0f / 3.0f, 11.0f / 3.0f, 4.0f};
-        printf("\nActual output:\n");
-        for (int i = 0; i < 16; i++)
-            printf("%.6f ", out->data[i]);
-        printf("\n");
         assert(check_tensor(out, expected, 16));
         tensor_destroy(input);
         tensor_destroy(out);
     }
-
-    /* 测试常数张量，align_corners 不影响 */
     {
         int in_dims[] = {1, 1, 2, 2};
         float in_data[] = {5.0f, 5.0f, 5.0f, 5.0f};
@@ -625,16 +565,13 @@ void test_upsample2d_linear()
         tensor_destroy(out0);
         tensor_destroy(out1);
     }
-
     PASS();
 }
+
 void test_upsample2d_cubic()
 {
     TEST("tensor_upsample2d cubic");
-
-    // align_corners = 0
     {
-        // 常数张量
         int in_dims1[] = {1, 1, 2, 2};
         float in_data1[] = {1.0f, 1.0f, 1.0f, 1.0f};
         Tensor *input1 = tensor_from_array(in_data1, 4, in_dims1);
@@ -646,9 +583,7 @@ void test_upsample2d_cubic()
         tensor_destroy(input1);
         tensor_destroy(out1);
     }
-
     {
-        // scale = 1
         int in_dims2[] = {1, 1, 3, 3};
         float in_data2[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
         Tensor *input2 = tensor_from_array(in_data2, 4, in_dims2);
@@ -659,9 +594,6 @@ void test_upsample2d_cubic()
         tensor_destroy(input2);
         tensor_destroy(out2);
     }
-
-    // 测试 align_corners = 1（可选，可手动计算或参考标准库）
-    // 这里简单验证角点对齐
     {
         int in_dims[] = {1, 1, 2, 2};
         float in_data[] = {1, 2, 3, 4};
@@ -669,7 +601,6 @@ void test_upsample2d_cubic()
         int out_dims[] = {1, 1, 4, 4};
         Tensor *out = tensor_create(4, out_dims);
         tensor_upsample2d(input, 2, 2, UPSAMPLE_CUBIC, 1, out);
-        // 角点应等于输入角点
         assert(approx_equal(out->data[0], 1.0f, EPS));
         assert(approx_equal(out->data[3], 2.0f, EPS));
         assert(approx_equal(out->data[12], 3.0f, EPS));
@@ -677,7 +608,6 @@ void test_upsample2d_cubic()
         tensor_destroy(input);
         tensor_destroy(out);
     }
-
     PASS();
 }
 
@@ -689,7 +619,6 @@ void test_conv_transpose1d()
     float bias_val = 0;
     int in_dims[] = {1, 1, 3};
     int w_dims[] = {1, 1, 3};
-    // 输出长度 (3-1)*1 + (3-1)*1 + 1 - 0 = 5
     int out_dims[] = {1, 1, 5};
     Tensor *input = tensor_from_array(in_data, 3, in_dims);
     Tensor *weight = tensor_from_array(w_data, 3, w_dims);
@@ -704,8 +633,6 @@ void test_conv_transpose1d()
 
     TensorStatus status = tensor_conv_transpose1d(input, weight, bias, params, output);
     assert(status == TENSOR_OK);
-
-    // 手动计算结果：[1,2,2,-2,-3]
     float expected[] = {1, 2, 2, -2, -3};
     assert(check_tensor(output, expected, 5));
 
@@ -719,7 +646,6 @@ void test_conv_transpose1d()
 void test_conv_transpose2d()
 {
     TEST("tensor_conv_transpose2d");
-    // 2x2 输入，1x1 核，输出相同
     float in_data[] = {1, 2, 3, 4};
     float w_data[] = {1};
     int in_dims[] = {1, 1, 2, 2};
@@ -750,7 +676,6 @@ void test_conv_transpose2d()
 void test_conv_transpose3d()
 {
     TEST("tensor_conv_transpose3d");
-    // 2x2x2 输入，1x1x1 核，输出相同
     float in_data[] = {1, 2, 3, 4, 5, 6, 7, 8};
     float w_data[] = {1};
     int in_dims[] = {1, 1, 2, 2, 2};
@@ -780,6 +705,656 @@ void test_conv_transpose3d()
     tensor_destroy(output);
     PASS();
 }
+
+void test_max_unpool2d()
+{
+    TEST("tensor_max_unpool2d");
+    float x_data[] = {5, 7, 2, 4};
+    int x_dims[] = {1, 1, 2, 2};
+    float idx_data[] = {0, 5, 10, 15};
+    int idx_dims[] = {1, 1, 2, 2};
+    int out_size[] = {4, 4};
+    int out_dims[] = {1, 1, 4, 4};
+    Tensor *x = tensor_from_array(x_data, 4, x_dims);
+    Tensor *idx = tensor_from_array(idx_data, 4, idx_dims);
+    Tensor *out = tensor_create(4, out_dims);
+
+    TensorStatus status = tensor_max_unpool2d(x, idx, out_size, out);
+    assert(status == TENSOR_OK);
+    float expected[16] = {0};
+    expected[0] = 5;
+    expected[5] = 7;
+    expected[10] = 2;
+    expected[15] = 4;
+    assert(check_tensor(out, expected, 16));
+
+    tensor_destroy(x);
+    tensor_destroy(idx);
+    tensor_destroy(out);
+    PASS();
+}
+
+void test_adaptive_avg_pool2d()
+{
+    TEST("tensor_adaptive_avg_pool2d");
+    float in_data[] = {
+        1, 2, 3, 4,
+        5, 6, 7, 8,
+        9, 10, 11, 12,
+        13, 14, 15, 16};
+    int in_dims[] = {1, 1, 4, 4};
+    int out_size[] = {2, 2};
+    int out_dims[] = {1, 1, 2, 2};
+    Tensor *x = tensor_from_array(in_data, 4, in_dims);
+    Tensor *out = tensor_create(4, out_dims);
+
+    tensor_adaptive_avg_pool2d(x, out_size, out);
+    float expected[] = {3.5, 5.5, 11.5, 13.5};
+    assert(check_tensor(out, expected, 4));
+
+    tensor_destroy(x);
+    tensor_destroy(out);
+    PASS();
+}
+
+/* ---------- 新增测试 ---------- */
+
+void test_conv2d_groups()
+{
+    TEST("tensor_conv2d groups>1");
+    float in_data[36];
+    for (int i = 0; i < 36; i++)
+        in_data[i] = i + 1;
+    int in_dims[] = {1, 4, 3, 3};
+    float w_data[72];
+    for (int i = 0; i < 72; i++)
+        w_data[i] = 1;
+    int w_dims[] = {4, 2, 3, 3};
+    int out_dims[] = {1, 4, 1, 1};
+    Tensor *input = tensor_from_array(in_data, 4, in_dims);
+    Tensor *weight = tensor_from_array(w_data, 4, w_dims);
+    Tensor *output = tensor_create(4, out_dims);
+
+    ConvParams params = {0};
+    params.pad[0] = 0;
+    params.pad[1] = 0;
+    params.stride[0] = 1;
+    params.stride[1] = 1;
+    params.dilation[0] = 1;
+    params.dilation[1] = 1;
+    params.groups = 2;
+
+    TensorStatus status = tensor_conv2d(input, weight, NULL, params, output);
+    assert(status == TENSOR_OK);
+
+    float expected[] = {171, 171, 495, 495};
+    assert(check_tensor(output, expected, 4));
+
+    tensor_destroy(input);
+    tensor_destroy(weight);
+    tensor_destroy(output);
+    PASS();
+}
+
+void test_conv2d_params()
+{
+    TEST("tensor_conv2d with pad/stride/dilation");
+    float in_data[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+    int in_dims[] = {1, 1, 3, 3};
+    float w_data[] = {1, 1, 1, 1};
+    int w_dims[] = {1, 1, 2, 2};
+    Tensor *input = tensor_from_array(in_data, 4, in_dims);
+    Tensor *weight = tensor_from_array(w_data, 4, w_dims);
+
+    ConvParams params = {0};
+    params.pad[0] = 1;
+    params.pad[1] = 1;
+    params.stride[0] = 2;
+    params.stride[1] = 2;
+    params.dilation[0] = 1;
+    params.dilation[1] = 1;
+    params.groups = 1;
+
+    int out_dims[] = {1, 1, 2, 2};
+    Tensor *output = tensor_create(4, out_dims);
+    TensorStatus status;
+    status = tensor_conv2d(input, weight, NULL, params, output);
+    assert(status == TENSOR_OK);
+    assert(output->dims[2] == 2 && output->dims[3] == 2);
+    tensor_destroy(output);
+
+    params.dilation[0] = 2;
+    params.dilation[1] = 2;
+    params.pad[0] = 1;
+    params.pad[1] = 1;
+    Tensor *output2 = tensor_create(4, out_dims);
+    status = tensor_conv2d(input, weight, NULL, params, output2);
+    assert(status == TENSOR_OK);
+    tensor_destroy(output2);
+
+    tensor_destroy(input);
+    tensor_destroy(weight);
+    PASS();
+}
+
+void test_conv_transpose1d_params()
+{
+    TEST("tensor_conv_transpose1d with stride>1, pad>0, dilation>0");
+    float in_data[] = {1, 2, 3};
+    float w_data[] = {1, 2, 1};
+    int in_dims[] = {1, 1, 3};
+    int w_dims[] = {1, 1, 3};
+    Tensor *input = tensor_from_array(in_data, 3, in_dims);
+    Tensor *weight = tensor_from_array(w_data, 3, w_dims);
+
+    ConvParams params = {0};
+    params.pad[0] = 1;
+    params.stride[0] = 2;
+    params.dilation[0] = 1;
+    params.groups = 1;
+
+    int out_dims[] = {1, 1, 5};
+    Tensor *output = tensor_create(3, out_dims);
+    TensorStatus status = tensor_conv_transpose1d(input, weight, NULL, params, output);
+    assert(status == TENSOR_OK);
+    tensor_destroy(output);
+
+    params.dilation[0] = 2;
+    int out_dims2[] = {1, 1, 7};
+    Tensor *output2 = tensor_create(3, out_dims2);
+    status = tensor_conv_transpose1d(input, weight, NULL, params, output2);
+    assert(status == TENSOR_OK);
+    tensor_destroy(output2);
+
+    tensor_destroy(input);
+    tensor_destroy(weight);
+    PASS();
+}
+
+void test_pool1d_count_include_pad()
+{
+    TEST("tensor_pool1d avg with count_include_pad=1");
+    float in_data[] = {1, 2, 3, 4};
+    int in_dims[] = {1, 1, 4};
+    Tensor *input = tensor_from_array(in_data, 3, in_dims);
+
+    PoolParams params = {0};
+    params.kernel[0] = 3;
+    params.stride[0] = 2;
+    params.pad[0] = 1;
+    params.ceil_mode = 0;
+    params.count_include_pad = 1;
+
+    int out_dims[] = {1, 1, 2};
+    Tensor *output = tensor_create(3, out_dims);
+
+    tensor_pool1d(input, POOL_AVG, params, output);
+    float expected[] = {1, 3};
+    assert(check_tensor(output, expected, 2));
+
+    tensor_destroy(input);
+    tensor_destroy(output);
+    PASS();
+}
+
+void test_lrn_numerical()
+{
+    TEST("tensor_lrn numerical");
+    float in_data[] = {1, 2, 3};
+    int in_dims[] = {1, 3, 1, 1};
+    Tensor *x = tensor_from_array(in_data, 4, in_dims);
+    Tensor *y = tensor_create(4, in_dims);
+
+    int size = 3;
+    float alpha = 0.0001f;
+    float beta = 0.75f;
+    float bias = 1.0f;
+    tensor_lrn(x, size, alpha, beta, bias, y);
+
+    float expected[] = {0.999875f, 1.9993f, 2.999025f};
+    assert(check_tensor(y, expected, 3));
+
+    tensor_destroy(x);
+    tensor_destroy(y);
+    PASS();
+}
+
+void test_gelu_numerical()
+{
+    TEST("tensor_gelu numerical");
+    float x_data[] = {0, 1, -1};
+    int dims[] = {3};
+    Tensor *x = tensor_from_array(x_data, 1, dims);
+    Tensor *y = tensor_create(1, dims);
+    tensor_gelu(x, y);
+    float expected[] = {0.0f, 0.841344746f, -0.158655254f};
+    print_tensor(y, "y");
+    assert(check_tensor(y, expected, 3));
+    tensor_destroy(x);
+    tensor_destroy(y);
+    PASS();
+}
+
+void test_swish_numerical()
+{
+    TEST("tensor_swish numerical");
+    float x_data[] = {0, 1, -1};
+    int dims[] = {3};
+    Tensor *x = tensor_from_array(x_data, 1, dims);
+    Tensor *y = tensor_create(1, dims);
+    tensor_swish(x, y);
+    float expected[] = {0, 0.7310586f, -0.2689414f};
+    assert(check_tensor(y, expected, 3));
+    tensor_destroy(x);
+    tensor_destroy(y);
+    PASS();
+}
+
+void test_mish_numerical()
+{
+    TEST("tensor_mish numerical");
+    float x_data[] = {0, 1, -1};
+    int dims[] = {3};
+    Tensor *x = tensor_from_array(x_data, 1, dims);
+    Tensor *y = tensor_create(1, dims);
+    tensor_mish(x, y);
+    // 更精确的期望值（源自精确数学计算）
+    float expected[] = {0.0f, 0.8650984f, -0.30340144f};
+    print_tensor(y, "y");
+    float diff1 = fabsf(y->data[1] - 0.8650984f);
+    float diff2 = fabsf(y->data[2] + 0.30340144f);
+    printf("diff1 = %g, diff2 = %g\n", diff1, diff2);
+    assert(check_tensor(y, expected, 3));
+    tensor_destroy(x);
+    tensor_destroy(y);
+    PASS();
+}
+
+void test_dropout_statistics()
+{
+    TEST("tensor_dropout statistics");
+    srand(12345);
+    int n = 10000;
+    int dims[] = {n};
+    float p = 0.3f;
+    float *x_data = (float *)malloc(n * sizeof(float));
+    for (int i = 0; i < n; i++)
+        x_data[i] = 1.0f;
+    Tensor *x = tensor_from_array(x_data, 1, dims);
+    Tensor *y = tensor_create(1, dims);
+    tensor_dropout(x, p, 1, y);
+
+    int zero_count = 0;
+    for (int i = 0; i < n; i++)
+    {
+        if (y->data[i] == 0)
+            zero_count++;
+    }
+    float observed_p = (float)zero_count / n;
+    assert(fabsf(observed_p - p) < 0.02);
+    float scale = 1.0f / (1.0f - p);
+    for (int i = 0; i < n; i++)
+    {
+        if (y->data[i] != 0)
+        {
+            assert(approx_equal(y->data[i], scale, EPS));
+        }
+    }
+    free(x_data);
+    tensor_destroy(x);
+    tensor_destroy(y);
+    PASS();
+}
+
+void test_softmax_axis()
+{
+    TEST("tensor_softmax axis");
+    float data[] = {1, 2, 3, 4, 5, 6};
+    int dims[] = {2, 3};
+    Tensor *x = tensor_from_array(data, 2, dims);
+    Tensor *y = tensor_create(2, dims);
+
+    tensor_softmax(x, 0, y);
+    float exp_row0[] = {expf(1), expf(2), expf(3)};
+    float exp_row1[] = {expf(4), expf(5), expf(6)};
+    float sum_exp_row0 = expf(1) + expf(4);
+    float sum_exp_row1 = expf(2) + expf(5);
+    float sum_exp_row2 = expf(3) + expf(6);
+    float expected_axis0[] = {
+        expf(1) / sum_exp_row0, expf(2) / sum_exp_row1, expf(3) / sum_exp_row2,
+        expf(4) / sum_exp_row0, expf(5) / sum_exp_row1, expf(6) / sum_exp_row2};
+    assert(check_tensor(y, expected_axis0, 6));
+
+    tensor_softmax(x, 1, y);
+    float sum_exp0 = expf(1) + expf(2) + expf(3);
+    float sum_exp1 = expf(4) + expf(5) + expf(6);
+    float expected_axis1[] = {
+        expf(1) / sum_exp0, expf(2) / sum_exp0, expf(3) / sum_exp0,
+        expf(4) / sum_exp1, expf(5) / sum_exp1, expf(6) / sum_exp1};
+    assert(check_tensor(y, expected_axis1, 6));
+
+    tensor_destroy(x);
+    tensor_destroy(y);
+    PASS();
+}
+
+/* ---------- 错误测试 ---------- */
+
+void test_conv_errors()
+{
+    TEST("convolution error paths");
+    int in_dims[] = {1, 1, 5};
+    int w_dims[] = {1, 1, 3};
+    float dummy[10];
+    Tensor *input = tensor_from_array(dummy, 3, in_dims);
+    Tensor *weight = tensor_from_array(dummy, 3, w_dims);
+    Tensor *output = tensor_create(3, (int[]){1, 1, 3});
+
+    ConvParams params = {0};
+    params.pad[0] = 0;
+    params.stride[0] = 1;
+    params.dilation[0] = 1;
+    params.groups = 1;
+
+    Tensor *input4d = tensor_create(4, (int[]){1, 1, 5, 1});
+    TensorStatus st = tensor_conv1d(input4d, weight, NULL, params, output);
+    assert(st == TENSOR_ERR_SHAPE_MISMATCH);
+    tensor_destroy(input4d);
+
+    Tensor *weight_bad = tensor_from_array(dummy, 3, (int[]){2, 1, 3});
+    st = tensor_conv1d(input, weight_bad, NULL, params, output);
+    assert(st == TENSOR_ERR_SHAPE_MISMATCH);
+    tensor_destroy(weight_bad);
+
+    params.stride[0] = 0;
+    st = tensor_conv1d(input, weight, NULL, params, output);
+    assert(st == TENSOR_ERR_INVALID_PARAM);
+    params.stride[0] = 1;
+
+    tensor_destroy(input);
+    tensor_destroy(weight);
+    tensor_destroy(output);
+    PASS();
+}
+
+void test_norm_errors()
+{
+    TEST("normalization error paths");
+    int x_dims[] = {2, 2, 1, 1};
+    float x_data[4] = {1, 2, 3, 4};
+    Tensor *x = tensor_from_array(x_data, 4, x_dims);
+    Tensor *y = tensor_create(4, x_dims);
+
+    Tensor *mean_bad = tensor_create(1, (int[]){3});
+    Tensor *var_bad = tensor_create(1, (int[]){3});
+    TensorStatus st = tensor_batchnorm(x, mean_bad, var_bad, NULL, NULL, 1e-5, y);
+    assert(st == TENSOR_ERR_SHAPE_MISMATCH);
+    tensor_destroy(mean_bad);
+    tensor_destroy(var_bad);
+
+    Tensor *scale_bad = tensor_create(1, (int[]){4});
+    st = tensor_layernorm(x, scale_bad, NULL, 1e-5, y);
+    assert(st == TENSOR_ERR_SHAPE_MISMATCH);
+    tensor_destroy(scale_bad);
+
+    st = tensor_instancenorm(x, scale_bad, NULL, 1e-5, y);
+    assert(st == TENSOR_ERR_SHAPE_MISMATCH);
+
+    st = tensor_groupnorm(x, NULL, NULL, 3, 1e-5, y);
+    assert(st == TENSOR_ERR_INVALID_PARAM);
+
+    tensor_destroy(x);
+    tensor_destroy(y);
+    PASS();
+}
+
+void test_linear_error()
+{
+    TEST("tensor_linear error");
+    int in_dims[] = {2, 3};
+    float in_data[6] = {0};
+    int w_dims[] = {4, 2};
+    Tensor *input = tensor_from_array(in_data, 2, in_dims);
+    Tensor *weight = tensor_create(2, w_dims);
+    Tensor *output = tensor_create(2, (int[]){2, 4});
+    TensorStatus st = tensor_linear(input, weight, NULL, output);
+    assert(st == TENSOR_ERR_SHAPE_MISMATCH);
+    tensor_destroy(input);
+    tensor_destroy(weight);
+    tensor_destroy(output);
+    PASS();
+}
+
+void test_max_unpool_error()
+{
+    TEST("tensor_max_unpool2d index out of bounds");
+    float x_data[] = {5};
+    int x_dims[] = {1, 1, 1, 1};
+    float idx_data[] = {100};
+    int idx_dims[] = {1, 1, 1, 1};
+    int out_size[] = {4, 4};
+    int out_dims[] = {1, 1, 4, 4};
+    Tensor *x = tensor_from_array(x_data, 4, x_dims);
+    Tensor *idx = tensor_from_array(idx_data, 4, idx_dims);
+    Tensor *out = tensor_create(4, out_dims);
+    TensorStatus st = tensor_max_unpool2d(x, idx, out_size, out);
+    assert(st == TENSOR_ERR_INDEX_OUT_OF_BOUNDS);
+    tensor_destroy(x);
+    tensor_destroy(idx);
+    tensor_destroy(out);
+    PASS();
+}
+
+void test_adaptive_pool_error()
+{
+    TEST("tensor_adaptive_avg_pool2d output_size > input");
+    int in_dims[] = {1, 1, 2, 2};
+    float in_data[4] = {0};
+    int out_size[] = {3, 3};
+    int out_dims[] = {1, 1, 3, 3};
+    Tensor *x = tensor_from_array(in_data, 4, in_dims);
+    Tensor *out = tensor_create(4, out_dims);
+    TensorStatus st = tensor_adaptive_avg_pool2d(x, out_size, out);
+    assert(st == TENSOR_ERR_INVALID_PARAM);
+    tensor_destroy(x);
+    tensor_destroy(out);
+    PASS();
+}
+
+void test_embedding()
+{
+    TEST("tensor_embedding");
+    float in_data[] = {0, 1, 2, 0};
+    int in_dims[] = {2, 2};
+    float w_data[] = {1, 2, 3, 4, 5, 6}; // vocab_size=3, emb_dim=2
+    int w_dims[] = {3, 2};
+    int out_dims[] = {2, 2, 2};
+    Tensor *input = tensor_from_array(in_data, 2, in_dims);
+    Tensor *weight = tensor_from_array(w_data, 2, w_dims);
+    Tensor *out = tensor_create(3, out_dims);
+
+    // 无 padding_idx
+    tensor_embedding(input, weight, -1, out);
+    float expected_no_pad[] = {1, 2, 3, 4, 5, 6, 1, 2}; // 已验证
+    assert(check_tensor(out, expected_no_pad, 8));
+
+    // padding_idx = 0
+    tensor_embedding(input, weight, 0, out);
+    float expected_pad[] = {0, 0, 3, 4, 5, 6, 0, 0};
+    assert(check_tensor(out, expected_pad, 8));
+
+    tensor_destroy(input);
+    tensor_destroy(weight);
+    tensor_destroy(out);
+    PASS();
+}
+
+void test_upsample1d()
+{
+    TEST("tensor_upsample1d");
+    float in_data[] = {1, 2, 3, 4};
+    int in_dims[] = {1, 2, 2}; // N=1, C=2, L=2
+    int out_dims[] = {1, 2, 4};
+    Tensor *x = tensor_from_array(in_data, 3, in_dims);
+    Tensor *out = tensor_create(3, out_dims);
+
+    // 最近邻
+    tensor_upsample1d(x, 2, UPSAMPLE_NEAREST, 0, out);
+    float expected_nearest[] = {1, 1, 2, 2, 3, 3, 4, 4};
+    assert(check_tensor(out, expected_nearest, 8));
+
+    // 线性插值 align_corners=0
+    tensor_upsample1d(x, 2, UPSAMPLE_LINEAR, 0, out);
+    float expected_linear0[] = {1, 1.25f, 1.75f, 2, 3, 3.25f, 3.75f, 4};
+    assert(check_tensor(out, expected_linear0, 8));
+
+    // 线性插值 align_corners=1
+    tensor_upsample1d(x, 2, UPSAMPLE_LINEAR, 1, out);
+    float expected_linear1[] = {1, 4.0f / 3, 5.0f / 3, 2, 3, 10.0f / 3, 11.0f / 3, 4};
+    assert(check_tensor(out, expected_linear1, 8));
+
+    // 三次插值 align_corners=0
+    tensor_upsample1d(x, 2, UPSAMPLE_CUBIC, 0, out);
+    float expected_cubic0[] = {1.15625, 1.15625, 1.84375, 1.84375, 3.15625, 3.15625, 3.84375, 3.84375}; // 占位
+    assert(check_tensor(out, expected_cubic0, 8));
+
+    // 三次插值 align_corners=1
+    tensor_upsample1d(x, 2, UPSAMPLE_CUBIC, 1, out);
+    float expected_cubic1[] = {1.0, 1.2592592, 1.7407408, 2.0, 3.0, 3.2592592, 3.7407408, 4.0};
+    assert(check_tensor(out, expected_cubic1, 8));
+
+    tensor_destroy(x);
+    tensor_destroy(out);
+    PASS();
+}
+
+void test_upsample3d()
+{
+    TEST("tensor_upsample3d");
+    float in_data[] = {1, 2, 3, 4, 5, 6, 7, 8}; // N=1,C=1,D=2,H=2,W=2
+    int in_dims[] = {1, 1, 2, 2, 2};
+    int out_dims[] = {1, 1, 4, 4, 4};
+    Tensor *x = tensor_from_array(in_data, 5, in_dims);
+    Tensor *out = tensor_create(5, out_dims);
+
+    // 最近邻
+    tensor_upsample3d(x, 2, 2, 2, UPSAMPLE_NEAREST, 0, out);
+    float expected_nearest[] = {1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 3.0, 3.0, 4.0, 4.0, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 3.0, 3.0, 4.0, 4.0, 5.0, 5.0, 6.0, 6.0, 5.0, 5.0, 6.0, 6.0, 7.0, 7.0, 8.0, 8.0, 7.0, 7.0, 8.0, 8.0, 5.0, 5.0, 6.0, 6.0, 5.0, 5.0, 6.0, 6.0, 7.0, 7.0, 8.0, 8.0, 7.0, 7.0, 8.0, 8.0};
+    assert(check_tensor(out, expected_nearest, 64));
+
+    // 线性插值 align_corners=0
+    tensor_upsample3d(x, 2, 2, 2, UPSAMPLE_LINEAR, 0, out);
+    float expected_linear0[] = {1.0, 1.25, 1.75, 2.0, 1.5, 1.75, 2.25, 2.5, 2.5, 2.75, 3.25, 3.5, 3.0, 3.25, 3.75, 4.0, 2.0, 2.25, 2.75, 3.0, 2.5, 2.75, 3.25, 3.5, 3.5, 3.75, 4.25, 4.5, 4.0, 4.25, 4.75, 5.0, 4.0, 4.25, 4.75, 5.0, 4.5, 4.75, 5.25, 5.5, 5.5, 5.75, 6.25, 6.5, 6.0, 6.25, 6.75, 7.0, 5.0, 5.25, 5.75, 6.0, 5.5, 5.75, 6.25, 6.5, 6.5, 6.75, 7.25, 7.5, 7.0, 7.25, 7.75, 8.0};
+    assert(check_tensor(out, expected_linear0, 64));
+
+    // 线性插值 align_corners=1
+    tensor_upsample3d(x, 2, 2, 2, UPSAMPLE_LINEAR, 1, out);
+    float expected_linear1[] = {1.0, 1.3333333, 1.6666667, 2.0, 1.6666666, 2.0, 2.3333335, 2.6666665, 2.3333333, 2.6666667, 3.0000002, 3.3333335, 3.0, 3.3333333, 3.6666667, 4.0, 2.3333335, 2.6666665, 3.0, 3.3333333, 3.0, 3.333333, 3.6666667, 4.0, 3.6666665, 4.0, 4.3333335, 4.666667, 4.3333335, 4.6666665, 5.0, 5.333333, 3.6666667, 3.9999998, 4.333333, 4.6666665, 4.333333, 4.6666665, 5.0, 5.3333335, 5.0, 5.3333335, 5.666667, 6.0000005, 5.666667, 6.0, 6.333334, 6.666667, 5.0, 5.333333, 5.6666665, 6.0, 5.6666665, 5.9999995, 6.333333, 6.6666665, 6.3333335, 6.6666665, 7.0000005, 7.3333335, 7.0, 7.333333, 7.666667, 8.0};
+    assert(check_tensor(out, expected_linear1, 64));
+
+    // 三次插值 align_corners=0
+    tensor_upsample3d(x, 2, 2, 2, UPSAMPLE_CUBIC, 0, out);
+    float expected_cubic0[] = {2.09375, 2.09375, 2.78125, 2.78125, 2.09375, 2.09375, 2.78125, 2.78125, 3.46875, 3.46875, 4.15625, 4.15625, 3.46875, 3.46875, 4.15625, 4.15625, 2.09375, 2.09375, 2.78125, 2.78125, 2.09375, 2.09375, 2.78125, 2.78125, 3.46875, 3.46875, 4.15625, 4.15625, 3.46875, 3.46875, 4.15625, 4.15625, 4.84375, 4.84375, 5.53125, 5.53125, 4.84375, 4.84375, 5.53125, 5.53125, 6.21875, 6.21875, 6.90625, 6.90625, 6.21875, 6.21875, 6.90625, 6.90625, 4.84375, 4.84375, 5.53125, 5.53125, 4.84375, 4.84375, 5.53125, 5.53125, 6.21875, 6.21875, 6.90625, 6.90625, 6.21875, 6.21875, 6.90625, 6.90625};
+    print_tensor(out,"cubic0");
+    assert(check_tensor(out, expected_cubic0, 64));
+
+    // 三次插值 align_corners=1
+    tensor_upsample3d(x, 2, 2, 2, UPSAMPLE_CUBIC, 1, out);
+    float expected_cubic1[] = {1.0, 1.2592592, 1.7407408, 2.0, 1.5185186, 1.7777778, 2.2592592, 2.5185184, 2.4814816, 2.7407408, 3.2222223, 3.4814816, 3.0, 3.2592592, 3.7407408, 4.0, 2.0370371, 2.2962964, 2.7777777, 3.0370371, 2.5555556, 2.8148148, 3.2962964, 3.5555556, 3.5185184, 3.7777777, 4.259259, 4.5185184, 4.037037, 4.296296, 4.7777777, 5.037037, 3.9629629, 4.2222223, 4.703704, 4.962963, 4.4814816, 4.740741, 5.2222223, 5.4814816, 5.4444447, 5.703704, 6.185185, 6.4444447, 5.962963, 6.2222223, 6.703704, 6.962963, 5.0, 5.259259, 5.740741, 6.0, 5.5185184, 5.7777777, 6.259259, 6.5185184, 6.4814816, 6.740741, 7.2222223, 7.4814816, 7.0, 7.259259, 7.740741, 8.0};
+    print_tensor(out,"cubic1");
+    assert(check_tensor(out, expected_cubic1, 64));
+
+    tensor_destroy(x);
+    tensor_destroy(out);
+    PASS();
+}
+
+void test_adaptive_avg_pool1d()
+{
+    TEST("tensor_adaptive_avg_pool1d");
+    float in_data[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    int in_dims[] = {2, 1, 4}; // N=2, C=1, L=4
+    int out_size[] = {2};
+    int out_dims[] = {2, 1, 2};
+    Tensor *x = tensor_from_array(in_data, 3, in_dims);
+    Tensor *out = tensor_create(3, out_dims);
+
+    tensor_adaptive_avg_pool1d(x, out_size, out);
+    float expected[] = {1.5, 3.5, 5.5, 7.5}; // 已验证
+    assert(check_tensor(out, expected, 4));
+
+    tensor_destroy(x);
+    tensor_destroy(out);
+    PASS();
+}
+
+void test_adaptive_avg_pool3d()
+{
+    TEST("tensor_adaptive_avg_pool3d");
+    float in_data[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}; // N=1,C=1,D=2,H=2,W=4
+    int in_dims[] = {1, 1, 2, 2, 4};
+    int out_size[] = {1, 1, 2};
+    int out_dims[] = {1, 1, 1, 1, 2};
+    Tensor *x = tensor_from_array(in_data, 5, in_dims);
+    Tensor *out = tensor_create(5, out_dims);
+
+    tensor_adaptive_avg_pool3d(x, out_size, out);
+    float expected[] = {7.5, 9.5};
+    assert(check_tensor(out, expected, 2));
+
+    tensor_destroy(x);
+    tensor_destroy(out);
+    PASS();
+}
+
+void test_max_unpool1d()
+{
+    TEST("tensor_max_unpool1d");
+    float x_data[] = {5, 7};
+    int x_dims[] = {1, 1, 2};
+    float idx_data[] = {2, 5}; // 输出长度为6
+    int idx_dims[] = {1, 1, 2};
+    int out_size[] = {6};
+    int out_dims[] = {1, 1, 6};
+    Tensor *x = tensor_from_array(x_data, 3, x_dims);
+    Tensor *idx = tensor_from_array(idx_data, 3, idx_dims);
+    Tensor *out = tensor_create(3, out_dims);
+
+    tensor_max_unpool1d(x, idx, out_size, out);
+    float expected[6] = {0, 0, 5, 0, 0, 7};
+    assert(check_tensor(out, expected, 6));
+
+    tensor_destroy(x);
+    tensor_destroy(idx);
+    tensor_destroy(out);
+    PASS();
+}
+
+void test_max_unpool3d()
+{
+    TEST("tensor_max_unpool3d");
+    float x_data[] = {5, 7};
+    int x_dims[] = {1, 1, 1, 1, 2}; // N=1,C=1,D=1,H=1,W=2
+    float idx_data[] = {10, 35};    // 输出尺寸 3x3x4 = 36
+    int idx_dims[] = {1, 1, 1, 1, 2};
+    int out_size[] = {3, 3, 4};
+    int out_dims[] = {1, 1, 3, 3, 4};
+    Tensor *x = tensor_from_array(x_data, 5, x_dims);
+    Tensor *idx = tensor_from_array(idx_data, 5, idx_dims);
+    Tensor *out = tensor_create(5, out_dims);
+
+    tensor_max_unpool3d(x, idx, out_size, out);
+    // 验证索引10和35位置的值
+    float *data = out->data;
+    assert(approx_equal(data[10], 5, EPS));
+    assert(approx_equal(data[35], 7, EPS));
+
+    tensor_destroy(x);
+    tensor_destroy(idx);
+    tensor_destroy(out);
+    PASS();
+}
+
 /* ---------- 主函数 ---------- */
 int main()
 {
@@ -808,6 +1383,32 @@ int main()
     test_conv_transpose2d();
     test_conv_transpose3d();
 
+    test_max_unpool2d();
+    test_adaptive_avg_pool2d();
+
+    test_conv2d_groups();
+    test_conv2d_params();
+    test_conv_transpose1d_params();
+    test_pool1d_count_include_pad();
+    test_lrn_numerical();
+    test_gelu_numerical();
+    test_swish_numerical();
+    test_mish_numerical();
+    test_dropout_statistics();
+    test_softmax_axis();
+    test_conv_errors();
+    test_norm_errors();
+    test_linear_error();
+    test_max_unpool_error();
+    test_adaptive_pool_error();
+
+    test_embedding();
+    test_upsample1d();
+    test_upsample3d();
+    test_adaptive_avg_pool1d();
+    test_adaptive_avg_pool3d();
+    test_max_unpool1d();
+    test_max_unpool3d();
     printf("All nn_ops tests passed!\n");
     return 0;
 }

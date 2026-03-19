@@ -6,9 +6,18 @@
 #include <string.h>
 #include <float.h>
 
-/* ---------- 随机数生成器 ---------- */
+/**
+ * @file random_ops.c
+ * @brief 随机数生成与打乱操作的实现（基于标准C库 rand()）
+ *
+ * 包含全局随机种子管理、均匀分布、正态分布、截断正态分布、
+ * 伯努利分布、随机整数生成以及沿第一维打乱张量的函数。
+ * 所有生成函数均通过通用迭代器 util_generate_op 实现。
+ */
 
-static unsigned int g_seed = 1;
+/* ==================== 全局随机种子 ==================== */
+
+static unsigned int g_seed = 1; //!< 当前随机种子
 
 void tensor_random_seed(unsigned int seed)
 {
@@ -16,20 +25,31 @@ void tensor_random_seed(unsigned int seed)
     srand(seed);
 }
 
-/* 生成 [0,1) 均匀随机数 */
+/**
+ * @brief 生成 [0,1) 区间均匀分布的随机浮点数
+ * @return 随机数
+ */
 static float rand_uniform(void)
 {
     return (float)rand() / (RAND_MAX + 1.0f);
 }
 
-/* ---------- 均匀分布 ---------- */
+/* ==================== 均匀分布 ==================== */
 
+/**
+ * @brief 均匀分布生成器的用户数据结构
+ */
 typedef struct
 {
-    float low;
-    float high;
+    float low;  //!< 下界（包含）
+    float high; //!< 上界（不包含）
 } uniform_data;
 
+/**
+ * @brief 均匀分布生成函数（供 util_generate_op 调用）
+ * @param data 指向 uniform_data 的指针
+ * @return 生成的随机数
+ */
 static float gen_uniform(void *data)
 {
     uniform_data *ud = (uniform_data *)data;
@@ -38,6 +58,8 @@ static float gen_uniform(void *data)
 
 TensorStatus tensor_random_uniform(Tensor *t, float low, float high)
 {
+    if (!t)
+        return TENSOR_ERR_NULL_PTR;
     if (high <= low)
         return TENSOR_ERR_INVALID_PARAM;
 
@@ -45,16 +67,24 @@ TensorStatus tensor_random_uniform(Tensor *t, float low, float high)
     return util_generate_op(t, gen_uniform, &ud);
 }
 
-/* ---------- 正态分布（Box-Muller） ---------- */
+/* ==================== 正态分布（Box-Muller） ==================== */
 
+/**
+ * @brief 正态分布生成器的用户数据结构（带缓存）
+ */
 typedef struct
 {
-    float mean;
-    float std;
-    int have_spare;
-    float spare;
+    float mean;     //!< 均值
+    float std;      //!< 标准差
+    int have_spare; //!< 是否有备用值
+    float spare;    //!< 备用值
 } normal_data;
 
+/**
+ * @brief 正态分布生成函数（Box-Muller 变换）
+ * @param data 指向 normal_data 的指针
+ * @return 生成的随机数
+ */
 static float gen_normal(void *data)
 {
     normal_data *nd = (normal_data *)data;
@@ -89,16 +119,24 @@ TensorStatus tensor_random_normal(Tensor *t, float mean, float std)
     return util_generate_op(t, gen_normal, &nd);
 }
 
-/* ---------- 截断正态分布（拒绝采样） ---------- */
+/* ==================== 截断正态分布（拒绝采样） ==================== */
 
+/**
+ * @brief 截断正态分布生成器的用户数据结构
+ */
 typedef struct
 {
-    float mean;
-    float std;
-    float a; // 原始下界
-    float b; // 原始上界
+    float mean; //!< 均值
+    float std;  //!< 标准差
+    float a;    //!< 原始下界
+    float b;    //!< 原始上界
 } trunc_normal_data;
 
+/**
+ * @brief 截断正态分布生成函数（拒绝采样）
+ * @param data 指向 trunc_normal_data 的指针
+ * @return 生成的随机数
+ */
 static float gen_trunc_normal(void *data)
 {
     trunc_normal_data *td = (trunc_normal_data *)data;
@@ -131,13 +169,21 @@ TensorStatus tensor_random_truncated_normal(Tensor *t, float mean, float std, fl
     return util_generate_op(t, gen_trunc_normal, &td);
 }
 
-/* ---------- 伯努利分布 ---------- */
+/* ==================== 伯努利分布 ==================== */
 
+/**
+ * @brief 伯努利分布生成器的用户数据结构
+ */
 typedef struct
 {
-    float p;
+    float p; //!< 概率为1的概率
 } bernoulli_data;
 
+/**
+ * @brief 伯努利分布生成函数
+ * @param data 指向 bernoulli_data 的指针
+ * @return 生成的随机数（0.0 或 1.0）
+ */
 static float gen_bernoulli(void *data)
 {
     bernoulli_data *bd = (bernoulli_data *)data;
@@ -155,19 +201,28 @@ TensorStatus tensor_random_bernoulli(Tensor *t, float p)
     return util_generate_op(t, gen_bernoulli, &bd);
 }
 
-/* ---------- 随机整数 ---------- */
+/* ==================== 随机整数 ==================== */
 
+/**
+ * @brief 随机整数生成器的用户数据结构
+ */
 typedef struct
 {
-    int low;
-    int high;
+    int low;  //!< 下界（包含）
+    int high; //!< 上界（不包含）
 } randint_data;
 
+/**
+ * @brief 随机整数生成函数
+ * @param data 指向 randint_data 的指针
+ * @return 生成的随机整数（以 float 形式存储）
+ */
 static float gen_randint(void *data)
 {
     randint_data *rd = (randint_data *)data;
     int range = rd->high - rd->low;
-    int r = rand() % range; // 假定 RAND_MAX 足够大，否则可能不均匀，但简单处理
+    // 简单取模，若 RAND_MAX 不够大可导致不均匀，但此处简化处理
+    int r = rand() % range;
     return (float)(rd->low + r);
 }
 
@@ -182,8 +237,14 @@ TensorStatus tensor_random_randint(Tensor *t, int low, int high)
     return util_generate_op(t, gen_randint, &rd);
 }
 
-/* ---------- 打乱（沿第一维） ---------- */
+/* ==================== 打乱（沿第一维） ==================== */
 
+/**
+ * @brief 沿第一维打乱张量（Fisher-Yates 算法）
+ * @param src 源张量
+ * @param dst 输出张量（新数据）
+ * @return TensorStatus
+ */
 TensorStatus tensor_shuffle(const Tensor *src, Tensor *dst)
 {
     if (!src || !dst)
@@ -198,7 +259,7 @@ TensorStatus tensor_shuffle(const Tensor *src, Tensor *dst)
     if (status != TENSOR_OK)
         return status;
 
-    // 复制 src 到 dst（利用已修改的 tensor_copy，支持非连续 src）
+    // 复制 src 到 dst
     status = tensor_copy(dst, src);
     if (status != TENSOR_OK)
         return status;

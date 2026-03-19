@@ -66,10 +66,10 @@ void test_get_set_item()
     PASS();
 }
 
-/* ---------- 测试 tensor_get_slice ---------- */
-void test_get_slice()
+/* ---------- 测试 tensor_slice ---------- */
+void test_slice()
 {
-    TEST("tensor_get_slice");
+    TEST("tensor_slice");
     int dims[] = {3, 4};
     float data[12];
     for (int i = 0; i < 12; i++)
@@ -81,7 +81,7 @@ void test_get_slice()
     int ends[] = {3, 3};
     int steps[] = {1, 2};
     Tensor view = {0};
-    TensorStatus status = tensor_get_slice(a, starts, ends, steps, &view);
+    TensorStatus status = tensor_slice(a, starts, ends, steps, &view);
     assert(status == TENSOR_OK);
 
     float expected1[] = {1, 5, 9};
@@ -102,7 +102,7 @@ void test_get_slice()
     int ends2[] = {0, 0};
     int steps2[] = {-1, -1};
     Tensor view2 = {0};
-    status = tensor_get_slice(a, starts2, ends2, steps2, &view2);
+    status = tensor_slice(a, starts2, ends2, steps2, &view2);
     assert(status == TENSOR_OK);
 
     float expected2[] = {11, 10, 9, 7, 6, 5};
@@ -269,17 +269,78 @@ void test_scatter()
     PASS();
 }
 
-/* ---------- 主函数 ---------- */
+void test_take()
+{
+    TEST("tensor_take");
+    int src_dims[] = {2, 3};
+    float src_data[] = {1, 2, 3, 4, 5, 6};
+    Tensor *src = tensor_from_array(src_data, 2, src_dims);
+    int idx_dims[] = {2, 2};
+    float idx_data[] = {0, 5, 2, 3};
+    Tensor *idx = tensor_from_array(idx_data, 2, idx_dims);
+    Tensor *out = tensor_create(2, idx_dims);
+    TensorStatus status = tensor_take(src, idx, out);
+    assert(status == TENSOR_OK);
+    float expected[] = {1, 6, 3, 4};
+    assert(check_tensor(out, expected, 4));
+    tensor_destroy(src);
+    tensor_destroy(idx);
+    tensor_destroy(out);
+    PASS();
+}
+
+void test_put()
+{
+    TEST("tensor_put");
+    int dst_dims[] = {2, 3};
+    float dst_data[6] = {0};
+    Tensor *dst = tensor_from_array(dst_data, 2, dst_dims);
+    int idx_dims[] = {2, 2};
+    float idx_data[] = {0, 5, 2, 3};
+    Tensor *idx = tensor_from_array(idx_data, 2, idx_dims);
+    float val_data[] = {10, 20, 30, 40};
+    Tensor *val = tensor_from_array(val_data, 2, idx_dims);
+    tensor_put(dst, idx, val, 0);
+    float expected1[6] = {10, 0, 30, 40, 0, 20};
+    assert(check_tensor(dst, expected1, 6));
+    tensor_put(dst, idx, val, 1);
+    float expected2[6] = {20, 0, 60, 80, 0, 40};
+    assert(check_tensor(dst, expected2, 6));
+    tensor_destroy(dst);
+    tensor_destroy(idx);
+    tensor_destroy(val);
+    PASS();
+}
+
+void test_nonzero()
+{
+    TEST("tensor_nonzero");
+    int src_dims[] = {2, 3};
+    float src_data[] = {0, 2, 0, 3, 0, 5};
+    Tensor *src = tensor_from_array(src_data, 2, src_dims);
+    int out_dims[] = {3, 2};
+    Tensor *out = tensor_create(2, out_dims);
+    TensorStatus status = tensor_nonzero(src, out);
+    assert(status == TENSOR_OK);
+    float expected[] = {0, 1, 1, 0, 1, 2};
+    assert(check_tensor(out, expected, 6));
+    tensor_destroy(src);
+    tensor_destroy(out);
+    PASS();
+}
+
 int main()
 {
     test_get_set_item();
-    test_get_slice();
+    test_slice();
     test_advanced_index();
     test_masked_select();
     test_index_put();
     test_gather();
     test_scatter();
-
+    test_take();
+    test_put();
+    test_nonzero();
     printf("All indexing tests passed!\n");
     return 0;
 }

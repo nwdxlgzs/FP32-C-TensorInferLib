@@ -81,9 +81,9 @@ void test_uniform()
     assert(check_range(t, -1.0f, 2.0f));
     float m = mean_scalar(t);
     float s = std_scalar(t);
-    // 理论均值 0.5，方差 0.75
+    // 理论均值 0.5，方差 0.75，标准差≈0.866
     assert(fabsf(m - 0.5f) < 0.1f);
-    assert(fabsf(s - 0.866f) < 0.1f); // sqrt(0.75)≈0.866
+    assert(fabsf(s - 0.866f) < 0.1f);
     tensor_destroy(t);
     PASS();
 }
@@ -92,7 +92,7 @@ void test_uniform()
 void test_normal()
 {
     TEST("tensor_random_normal");
-    int dims[] = {5000}; // 样本数
+    int dims[] = {5000};
     Tensor *t = tensor_create(1, dims);
     tensor_random_normal(t, 3.0f, 2.0f);
     float m = mean_scalar(t);
@@ -111,7 +111,6 @@ void test_truncated_normal()
     Tensor *t = tensor_create(1, dims);
     tensor_random_truncated_normal(t, 0.0f, 1.0f, -1.0f, 1.0f);
     assert(check_range(t, -1.0f, 1.0f));
-    // 截断后的均值应接近0，标准差小于1
     float m = mean_scalar(t);
     float s = std_scalar(t);
     assert(fabsf(m) < 0.1f);
@@ -142,7 +141,6 @@ void test_randint()
     Tensor *t = tensor_create(1, dims);
     tensor_random_randint(t, 5, 10);
     assert(check_int_range(t, 5, 10));
-    // 粗略检查分布：均值应在 7 附近
     float m = mean_scalar(t);
     assert(fabsf(m - 7.0f) < 0.5f);
     tensor_destroy(t);
@@ -196,7 +194,6 @@ void test_shuffle()
         if (equal)
             same_count++;
     }
-    // 5行完全相同的概率很低，但可能偶然，我们只要求 same_count < 5
     assert(same_count < 5); // 至少有一行不同
 
     tensor_destroy(src);
@@ -204,6 +201,121 @@ void test_shuffle()
     PASS();
 }
 
+/* ---------- 错误测试：均匀分布参数无效 ---------- */
+void test_uniform_error()
+{
+    TEST("tensor_random_uniform error (low >= high)");
+    int dims[] = {10};
+    Tensor *t = tensor_create(1, dims);
+    TensorStatus st = tensor_random_uniform(t, 5.0f, 5.0f); // low == high
+    assert(st == TENSOR_ERR_INVALID_PARAM);
+    st = tensor_random_uniform(t, 5.0f, 3.0f); // low > high
+    assert(st == TENSOR_ERR_INVALID_PARAM);
+    tensor_destroy(t);
+    PASS();
+}
+
+/* ---------- 错误测试：正态分布参数无效 ---------- */
+void test_normal_error()
+{
+    TEST("tensor_random_normal error (std < 0)");
+    int dims[] = {10};
+    Tensor *t = tensor_create(1, dims);
+    TensorStatus st = tensor_random_normal(t, 0.0f, -1.0f);
+    assert(st == TENSOR_ERR_INVALID_PARAM);
+    tensor_destroy(t);
+    PASS();
+}
+
+/* ---------- 错误测试：截断正态分布参数无效 ---------- */
+void test_truncated_normal_error()
+{
+    TEST("tensor_random_truncated_normal error");
+    int dims[] = {10};
+    Tensor *t = tensor_create(1, dims);
+
+    // std < 0
+    TensorStatus st = tensor_random_truncated_normal(t, 0.0f, -1.0f, -1.0f, 1.0f);
+    assert(st == TENSOR_ERR_INVALID_PARAM);
+
+    // a >= b
+    st = tensor_random_truncated_normal(t, 0.0f, 1.0f, 1.0f, 1.0f); // a==b
+    assert(st == TENSOR_ERR_INVALID_PARAM);
+    st = tensor_random_truncated_normal(t, 0.0f, 1.0f, 2.0f, 1.0f); // a>b
+    assert(st == TENSOR_ERR_INVALID_PARAM);
+
+    tensor_destroy(t);
+    PASS();
+}
+
+/* ---------- 错误测试：伯努利分布参数无效 ---------- */
+void test_bernoulli_error()
+{
+    TEST("tensor_random_bernoulli error (p out of [0,1])");
+    int dims[] = {10};
+    Tensor *t = tensor_create(1, dims);
+
+    TensorStatus st = tensor_random_bernoulli(t, -0.1f);
+    assert(st == TENSOR_ERR_INVALID_PARAM);
+
+    st = tensor_random_bernoulli(t, 1.1f);
+    assert(st == TENSOR_ERR_INVALID_PARAM);
+
+    tensor_destroy(t);
+    PASS();
+}
+
+/* ---------- 错误测试：随机整数参数无效 ---------- */
+void test_randint_error()
+{
+    TEST("tensor_random_randint error (low >= high)");
+    int dims[] = {10};
+    Tensor *t = tensor_create(1, dims);
+
+    TensorStatus st = tensor_random_randint(t, 5, 5); // low == high
+    assert(st == TENSOR_ERR_INVALID_PARAM);
+
+    st = tensor_random_randint(t, 10, 5); // low > high
+    assert(st == TENSOR_ERR_INVALID_PARAM);
+
+    tensor_destroy(t);
+    PASS();
+}
+
+/* ---------- 错误测试：shuffle 形状不匹配 ---------- */
+void test_shuffle_shape_mismatch()
+{
+    TEST("tensor_shuffle shape mismatch");
+    int dims_src[] = {5, 3};
+    int dims_dst[] = {5, 4}; // 不同
+    Tensor *src = tensor_create(2, dims_src);
+    Tensor *dst = tensor_create(2, dims_dst);
+
+    TensorStatus st = tensor_shuffle(src, dst);
+    assert(st == TENSOR_ERR_SHAPE_MISMATCH);
+
+    tensor_destroy(src);
+    tensor_destroy(dst);
+    PASS();
+}
+
+/* ---------- 错误测试：shuffle 输入维度小于1 ---------- */
+void test_shuffle_ndim_error()
+{
+    TEST("tensor_shuffle ndim < 1");
+    Tensor *src = tensor_create(0, NULL); // 标量，ndim=0
+    int dims_dst[] = {1};
+    Tensor *dst = tensor_create(1, dims_dst);
+
+    TensorStatus st = tensor_shuffle(src, dst);
+    assert(st == TENSOR_ERR_INVALID_PARAM);
+
+    tensor_destroy(src);
+    tensor_destroy(dst);
+    PASS();
+}
+
+/* ---------- 主函数 ---------- */
 int main()
 {
     test_seed();
@@ -213,6 +325,14 @@ int main()
     test_bernoulli();
     test_randint();
     test_shuffle();
+
+    test_uniform_error();
+    test_normal_error();
+    test_truncated_normal_error();
+    test_bernoulli_error();
+    test_randint_error();
+    test_shuffle_shape_mismatch();
+    test_shuffle_ndim_error();
 
     printf("All random_ops tests passed!\n");
     return 0;

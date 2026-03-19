@@ -6,12 +6,34 @@
 #include <stdio.h>
 #include <math.h>
 
-/* ---------- 辅助函数 ---------- */
-
 /**
- * 检查通过给定新维度数组是否可以创建视图（元素总数不变且原张量连续或提供了步长）。
- * 若可以，计算新的步长并填充到 new_strides 中。
- * 返回 1 表示成功，0 表示失败。
+ * @file shape_ops.c
+ * @brief 形状操作的实现：reshape, flatten, squeeze, unsqueeze, concat, stack, split, repeat, tile, transpose, flip, pad, cumsum, cumprod
+ */
+
+/* ==================== 辅助函数 ==================== */
+static void roll_1d(float *data, size_t n, int shift)
+{
+    if (n == 0)
+        return;
+    shift %= (int)n;
+    if (shift < 0)
+        shift += n;
+    if (shift == 0)
+        return;
+
+    float *tmp = (float *)malloc(shift * sizeof(float));
+    if (!tmp)
+        return; // 调用者应确保内存足够，这里简化处理
+    memcpy(tmp, data + n - shift, shift * sizeof(float));
+    memmove(data + shift, data, (n - shift) * sizeof(float));
+    memcpy(data, tmp, shift * sizeof(float));
+    free(tmp);
+}
+/**
+ * @brief 检查通过给定新维度数组是否可以创建视图（元素总数不变且原张量连续或提供了步长）。
+ *        若可以，计算新的步长并填充到 new_strides 中。
+ * @return 1 表示成功，0 表示失败。
  */
 static int can_reshape_as_view(const Tensor *src, int ndim, const int *dims,
                                int *new_strides, int *out_ndim, int *out_dims)
@@ -42,13 +64,14 @@ static int can_reshape_as_view(const Tensor *src, int ndim, const int *dims,
     return 0;
 }
 
-/* ---------- reshape ---------- */
+/* ==================== reshape ==================== */
 
 TensorStatus tensor_reshape(Tensor *t, int ndim, const int *dims)
 {
     if (!t || (ndim > 0 && !dims))
         return TENSOR_ERR_NULL_PTR;
-
+    if (ndim < 0 || ndim > TENSOR_MAX_DIM)
+        return TENSOR_ERR_INVALID_PARAM;
     size_t new_size = (ndim == 0) ? 1 : util_calc_size(dims, ndim);
     if (new_size != t->size)
         return TENSOR_ERR_SHAPE_MISMATCH;
@@ -88,10 +111,12 @@ TensorStatus tensor_reshape(Tensor *t, int ndim, const int *dims)
     return TENSOR_OK;
 }
 
-TensorStatus tensor_reshape_view(const Tensor *src, int ndim, const int *dims, Tensor *dst)
+TensorStatus tensor_reshape_view(Tensor *dst, const Tensor *src, int ndim, const int *dims)
 {
     if (!src || !dst || (ndim > 0 && !dims))
         return TENSOR_ERR_NULL_PTR;
+    if (ndim < 0 || ndim > TENSOR_MAX_DIM)
+        return TENSOR_ERR_INVALID_PARAM;
 
     // 标量视图特殊处理
     if (ndim == 0)
@@ -125,7 +150,7 @@ TensorStatus tensor_reshape_view(const Tensor *src, int ndim, const int *dims, T
     return TENSOR_OK;
 }
 
-/* ---------- flatten ---------- */
+/* ==================== flatten ==================== */
 
 TensorStatus tensor_flatten(const Tensor *src, int start_axis, int end_axis, Tensor *dst)
 {
@@ -143,6 +168,8 @@ TensorStatus tensor_flatten(const Tensor *src, int start_axis, int end_axis, Ten
         flat_dim *= src->dims[i];
 
     int out_ndim = ndim - (end - start);
+    if (out_ndim > TENSOR_MAX_DIM)
+        return TENSOR_ERR_INVALID_PARAM;
     int out_dims[TENSOR_MAX_DIM];
     int idx = 0;
     for (int i = 0; i < ndim; ++i)
@@ -171,7 +198,7 @@ TensorStatus tensor_flatten(const Tensor *src, int start_axis, int end_axis, Ten
     return TENSOR_OK;
 }
 
-/* ---------- squeeze ---------- */
+/* ==================== squeeze ==================== */
 
 TensorStatus tensor_squeeze(const Tensor *src, const int *axes, int num_axes, Tensor *dst)
 {
@@ -234,19 +261,19 @@ TensorStatus tensor_squeeze(const Tensor *src, const int *axes, int num_axes, Te
     return TENSOR_OK;
 }
 
-/* ---------- unsqueeze ---------- */
+/* ==================== unsqueeze ==================== */
 
 TensorStatus tensor_unsqueeze(const Tensor *src, int axis, Tensor *dst)
 {
     if (!src || !dst)
         return TENSOR_ERR_NULL_PTR;
-
     int ndim = src->ndim;
     int ax = util_normalize_axis(axis, ndim + 1);
     if (ax < 0)
         return TENSOR_ERR_INVALID_PARAM;
-
     int out_ndim = ndim + 1;
+    if (out_ndim > TENSOR_MAX_DIM)
+        return TENSOR_ERR_INVALID_PARAM;
     int out_dims[TENSOR_MAX_DIM];
     int out_strides[TENSOR_MAX_DIM];
 
@@ -278,7 +305,7 @@ TensorStatus tensor_unsqueeze(const Tensor *src, int axis, Tensor *dst)
     return TENSOR_OK;
 }
 
-/* ---------- concat ---------- */
+/* ==================== concat ==================== */
 
 TensorStatus tensor_concat(const Tensor **inputs, int num_inputs, int axis, Tensor *output)
 {
@@ -325,11 +352,11 @@ TensorStatus tensor_concat(const Tensor **inputs, int num_inputs, int axis, Tens
         int src_coords[TENSOR_MAX_DIM] = {0};
         while (1)
         {
-            size_t src_off = util_offset_from_coords(src_coords, src_strides, ndim);
+            ptrdiff_t src_off = util_offset_from_coords(src_coords, src_strides, ndim);
             int out_coords[TENSOR_MAX_DIM];
             memcpy(out_coords, src_coords, ndim * sizeof(int));
             out_coords[ax] += dst_offset_base;
-            size_t out_off = util_offset_from_coords(out_coords, out_strides, ndim);
+            ptrdiff_t out_off = util_offset_from_coords(out_coords, out_strides, ndim);
             output->data[out_off] = src->data[src_off];
 
             if (util_increment_coords(src_coords, src->dims, ndim))
@@ -340,25 +367,29 @@ TensorStatus tensor_concat(const Tensor **inputs, int num_inputs, int axis, Tens
     return TENSOR_OK;
 }
 
-/* ---------- stack ---------- */
+/* ==================== stack ==================== */
 
 TensorStatus tensor_stack(const Tensor **inputs, int num_inputs, int axis, Tensor *output)
 {
     if (!inputs || num_inputs < 1 || !output)
         return TENSOR_ERR_NULL_PTR;
-
     int ndim = inputs[0]->ndim;
     int ax = util_normalize_axis(axis, ndim + 1);
     if (ax < 0)
         return TENSOR_ERR_INVALID_PARAM;
-
     for (int k = 1; k < num_inputs; ++k)
     {
-        if (inputs[k]->ndim != ndim || !util_shapes_equal(inputs[k]->dims, inputs[0]->dims, ndim))
+        if (inputs[k]->ndim != ndim)
             return TENSOR_ERR_SHAPE_MISMATCH;
+        for (int i = 0; i < ndim; ++i)
+        {
+            if (inputs[k]->dims[i] != inputs[0]->dims[i])
+                return TENSOR_ERR_SHAPE_MISMATCH;
+        }
     }
-
     int out_ndim = ndim + 1;
+    if (out_ndim > TENSOR_MAX_DIM)
+        return TENSOR_ERR_INVALID_PARAM;
     int out_dims[TENSOR_MAX_DIM];
     for (int i = 0; i < ax; ++i)
         out_dims[i] = inputs[0]->dims[i];
@@ -385,14 +416,14 @@ TensorStatus tensor_stack(const Tensor **inputs, int num_inputs, int axis, Tenso
         int src_coords[TENSOR_MAX_DIM] = {0};
         while (1)
         {
-            size_t src_off = util_offset_from_coords(src_coords, src_strides, ndim);
+            ptrdiff_t src_off = util_offset_from_coords(src_coords, src_strides, ndim);
             int out_coords[TENSOR_MAX_DIM];
             for (int i = 0; i < ax; ++i)
                 out_coords[i] = src_coords[i];
             out_coords[ax] = k;
             for (int i = ax + 1; i < out_ndim; ++i)
                 out_coords[i] = src_coords[i - 1];
-            size_t out_off = util_offset_from_coords(out_coords, out_strides, out_ndim);
+            ptrdiff_t out_off = util_offset_from_coords(out_coords, out_strides, out_ndim);
             output->data[out_off] = src->data[src_off];
 
             if (util_increment_coords(src_coords, src->dims, ndim))
@@ -402,7 +433,7 @@ TensorStatus tensor_stack(const Tensor **inputs, int num_inputs, int axis, Tenso
     return TENSOR_OK;
 }
 
-/* ---------- split ---------- */
+/* ==================== split ==================== */
 
 TensorStatus tensor_split(const Tensor *src, int axis, const int *sizes, int num_splits,
                           Tensor **outputs)
@@ -464,118 +495,14 @@ TensorStatus tensor_split(const Tensor *src, int axis, const int *sizes, int num
     return TENSOR_OK;
 }
 
-/* ---------- slice ---------- */
-
-TensorStatus tensor_slice(const Tensor *src, const int *starts, const int *ends,
-                          const int *steps, Tensor *dst)
-{
-    if (!src || !starts || !ends || !dst)
-        return TENSOR_ERR_NULL_PTR;
-    int ndim = src->ndim;
-
-    int *step_arr = (int *)malloc(ndim * sizeof(int));
-    if (!step_arr)
-        return TENSOR_ERR_MEMORY;
-    for (int i = 0; i < ndim; i++)
-        step_arr[i] = (steps) ? steps[i] : 1;
-
-    int src_strides[TENSOR_MAX_DIM];
-    util_get_effective_strides(src, src_strides);
-
-    int *new_dims = (int *)malloc(ndim * sizeof(int));
-    int *new_strides = (int *)malloc(ndim * sizeof(int));
-    if (!new_dims || !new_strides)
-    {
-        free(step_arr);
-        free(new_dims);
-        free(new_strides);
-        return TENSOR_ERR_MEMORY;
-    }
-
-    ptrdiff_t data_offset = 0;
-
-    for (int i = 0; i < ndim; i++)
-    {
-        int dim = src->dims[i];
-        int start = starts[i];
-        int end = ends[i];
-        int step = step_arr[i];
-
-        if (step == 0)
-        {
-            free(step_arr);
-            free(new_dims);
-            free(new_strides);
-            return TENSOR_ERR_INVALID_PARAM;
-        }
-
-        if (start < 0)
-            start += dim;
-        if (end < 0)
-            end += dim;
-
-        if (start < 0)
-            start = 0;
-        if (start > dim)
-            start = dim;
-        if (end < 0)
-            end = 0;
-        if (end > dim)
-            end = dim;
-
-        int size;
-        if (step > 0)
-        {
-            if (start >= end)
-                size = 0;
-            else
-                size = (end - start + step - 1) / step;
-        }
-        else
-        {
-            if (start <= end)
-                size = 0;
-            else
-                size = (start - end - step - 1) / (-step);
-        }
-
-        if (size == 0)
-        {
-            free(step_arr);
-            free(new_dims);
-            free(new_strides);
-            return TENSOR_ERR_INVALID_PARAM;
-        }
-
-        new_dims[i] = size;
-        new_strides[i] = src_strides[i] * step;
-        data_offset += (ptrdiff_t)start * src_strides[i];
-    }
-
-    size_t total_size = 1;
-    for (int i = 0; i < ndim; i++)
-        total_size *= new_dims[i];
-
-    dst->data = src->data + data_offset;
-    dst->ndim = ndim;
-    dst->dims = new_dims;
-    dst->strides = new_strides;
-    dst->size = total_size;
-    dst->ref_count = src->ref_count;
-    if (dst->ref_count)
-        (*(dst->ref_count))++;
-    dst->owns_dims_strides = 1;
-
-    free(step_arr);
-    return TENSOR_OK;
-}
-
-/* ---------- repeat ---------- */
+/* ==================== repeat ==================== */
 
 TensorStatus tensor_repeat(const Tensor *src, int axis, int repeats, Tensor *dst)
 {
-    if (!src || !dst || repeats < 1)
+    if (!src || !dst)
         return TENSOR_ERR_NULL_PTR;
+    if (repeats < 1)
+        return TENSOR_ERR_INVALID_PARAM;
 
     int ndim = src->ndim;
     int ax = util_normalize_axis(axis, ndim);
@@ -601,7 +528,7 @@ TensorStatus tensor_repeat(const Tensor *src, int axis, int repeats, Tensor *dst
     int src_coords[TENSOR_MAX_DIM] = {0};
     while (1)
     {
-        size_t src_off = util_offset_from_coords(src_coords, src_strides, ndim);
+        ptrdiff_t src_off = util_offset_from_coords(src_coords, src_strides, ndim);
         float val = src->data[src_off];
 
         int dst_coords[TENSOR_MAX_DIM];
@@ -609,7 +536,7 @@ TensorStatus tensor_repeat(const Tensor *src, int axis, int repeats, Tensor *dst
         for (int r = 0; r < repeats; ++r)
         {
             dst_coords[ax] = src_coords[ax] * repeats + r;
-            size_t dst_off = util_offset_from_coords(dst_coords, dst_strides, ndim);
+            ptrdiff_t dst_off = util_offset_from_coords(dst_coords, dst_strides, ndim);
             dst->data[dst_off] = val;
         }
 
@@ -619,7 +546,7 @@ TensorStatus tensor_repeat(const Tensor *src, int axis, int repeats, Tensor *dst
     return TENSOR_OK;
 }
 
-/* ---------- tile ---------- */
+/* ==================== tile ==================== */
 
 TensorStatus tensor_tile(const Tensor *src, const int *reps, Tensor *dst)
 {
@@ -650,8 +577,8 @@ TensorStatus tensor_tile(const Tensor *src, const int *reps, Tensor *dst)
         for (int i = 0; i < ndim_src; ++i)
             src_coords[i] = dst_coords[i] % src->dims[i];
 
-        size_t src_off = util_offset_from_coords(src_coords, src_strides, ndim_src);
-        size_t dst_off = util_offset_from_coords(dst_coords, dst_strides, ndim_src);
+        ptrdiff_t src_off = util_offset_from_coords(src_coords, src_strides, ndim_src);
+        ptrdiff_t dst_off = util_offset_from_coords(dst_coords, dst_strides, ndim_src);
         dst->data[dst_off] = src->data[src_off];
 
         if (util_increment_coords(dst_coords, out_dims, ndim_src))
@@ -660,7 +587,7 @@ TensorStatus tensor_tile(const Tensor *src, const int *reps, Tensor *dst)
     return TENSOR_OK;
 }
 
-/* ---------- transpose_axes ---------- */
+/* ==================== transpose_axes ==================== */
 
 TensorStatus tensor_transpose_axes(const Tensor *src, const int *axes, Tensor *dst)
 {
@@ -694,7 +621,7 @@ TensorStatus tensor_transpose_axes(const Tensor *src, const int *axes, Tensor *d
     return TENSOR_OK;
 }
 
-/* ---------- swapaxes ---------- */
+/* ==================== swapaxes ==================== */
 
 TensorStatus tensor_swapaxes(Tensor *t, int axis1, int axis2)
 {
@@ -731,7 +658,7 @@ TensorStatus tensor_swapaxes(Tensor *t, int axis1, int axis2)
     return TENSOR_OK;
 }
 
-/* ---------- flip ---------- */
+/* ==================== flip ==================== */
 
 TensorStatus tensor_flip(const Tensor *src, const int *axes, int num_axes, Tensor *dst)
 {
@@ -822,7 +749,7 @@ TensorStatus tensor_flip(const Tensor *src, const int *axes, int num_axes, Tenso
     return TENSOR_OK;
 }
 
-/* ---------- pad ---------- */
+/* ==================== pad ==================== */
 
 TensorStatus tensor_pad(const Tensor *src, const int *pad_widths, PadMode mode,
                         float constant_value, Tensor *dst)
@@ -883,10 +810,10 @@ TensorStatus tensor_pad(const Tensor *src, const int *pad_widths, PadMode mode,
             src_coords[i] = d;
         }
 
-        size_t dst_off = util_offset_from_coords(dst_coords, dst_strides, ndim);
+        ptrdiff_t dst_off = util_offset_from_coords(dst_coords, dst_strides, ndim);
         if (in_range)
         {
-            size_t src_off = util_offset_from_coords(src_coords, src_strides, ndim);
+            ptrdiff_t src_off = util_offset_from_coords(src_coords, src_strides, ndim);
             dst->data[dst_off] = src->data[src_off];
         }
         else
@@ -958,7 +885,7 @@ TensorStatus tensor_pad(const Tensor *src, const int *pad_widths, PadMode mode,
             }
             else
             {
-                size_t src_off = util_offset_from_coords(mapped_coords, src_strides, ndim);
+                ptrdiff_t src_off = util_offset_from_coords(mapped_coords, src_strides, ndim);
                 dst->data[dst_off] = src->data[src_off];
             }
         }
@@ -971,7 +898,7 @@ TensorStatus tensor_pad(const Tensor *src, const int *pad_widths, PadMode mode,
     return TENSOR_OK;
 }
 
-/* ---------- cumsum ---------- */
+/* ==================== cumsum ==================== */
 
 TensorStatus tensor_cumsum(const Tensor *src, int axis, Tensor *dst)
 {
@@ -1039,7 +966,7 @@ TensorStatus tensor_cumsum(const Tensor *src, int axis, Tensor *dst)
     return TENSOR_OK;
 }
 
-/* ---------- cumprod ---------- */
+/* ==================== cumprod ==================== */
 
 TensorStatus tensor_cumprod(const Tensor *src, int axis, Tensor *dst)
 {
@@ -1104,5 +1031,302 @@ TensorStatus tensor_cumprod(const Tensor *src, int axis, Tensor *dst)
         if (util_increment_coords(outer_coords, outer_dims, outer_ndim))
             break;
     }
+    return TENSOR_OK;
+}
+TensorStatus tensor_broadcast_to(const Tensor *src, int ndim, const int *dims, Tensor *out)
+{
+    if (!src || !out || (ndim > 0 && !dims))
+        return TENSOR_ERR_NULL_PTR;
+    if (ndim < 0)
+        return TENSOR_ERR_INVALID_PARAM;
+
+    int src_ndim = src->ndim;
+    // 从右向左检查兼容性
+    int i_src = src_ndim - 1;
+    int i_tar = ndim - 1;
+    while (i_src >= 0 && i_tar >= 0)
+    {
+        int src_dim = src->dims[i_src];
+        int tar_dim = dims[i_tar];
+        if (src_dim != tar_dim && src_dim != 1 && tar_dim != 1)
+            return TENSOR_ERR_SHAPE_MISMATCH;
+        i_src--;
+        i_tar--;
+    }
+    if (i_src >= 0)
+        return TENSOR_ERR_SHAPE_MISMATCH;
+    while (i_tar >= 0)
+    {
+        if (dims[i_tar] != 1)
+            return TENSOR_ERR_SHAPE_MISMATCH;
+        i_tar--;
+    }
+
+    // 手动构建视图结构
+    Tensor *view = (Tensor *)malloc(sizeof(Tensor));
+    if (!view)
+        return TENSOR_ERR_MEMORY;
+
+    view->data = src->data;
+    view->ndim = ndim;
+    view->dims = util_copy_ints(dims, ndim);
+    if (!view->dims)
+    {
+        free(view);
+        return TENSOR_ERR_MEMORY;
+    }
+    view->strides = (int *)malloc(ndim * sizeof(int));
+    if (!view->strides)
+    {
+        free(view->dims);
+        free(view);
+        return TENSOR_ERR_MEMORY;
+    }
+
+    // 计算源张量的连续步长（行主序）
+    int src_contiguous_strides[TENSOR_MAX_DIM];
+    int stride = 1;
+    for (int i = src_ndim - 1; i >= 0; --i)
+    {
+        src_contiguous_strides[i] = stride;
+        stride *= src->dims[i];
+    }
+
+    int offset = ndim - src_ndim;
+    // 左边新增维度步长为0
+    for (int i = 0; i < offset; ++i)
+        view->strides[i] = 0;
+
+    // 剩余维度继承自源连续步长，但若源维度为1，则步长设为0
+    for (int i = 0; i < src_ndim; ++i)
+    {
+        int idx = offset + i;
+        if (src->dims[i] == 1)
+        {
+            view->strides[idx] = 0;
+        }
+        else
+        {
+            view->strides[idx] = src_contiguous_strides[i];
+        }
+    }
+
+    view->size = util_calc_size(dims, ndim);
+    view->ref_count = src->ref_count;
+    if (view->ref_count)
+        (*view->ref_count)++;
+    view->owns_dims_strides = 1;
+
+    *out = *view;
+    free(view);
+    return TENSOR_OK;
+}
+
+TensorStatus tensor_roll(const Tensor *src, const int *shifts, int num_axes,
+                         const int *axes, Tensor *out)
+{
+    if (!src || !shifts || !out)
+        return TENSOR_ERR_NULL_PTR;
+    if (num_axes <= 0)
+        return TENSOR_ERR_INVALID_PARAM;
+
+    // 检查输出形状必须与 src 相同
+    if (out->ndim != src->ndim || !util_shapes_equal(out->dims, src->dims, src->ndim))
+        return TENSOR_ERR_SHAPE_MISMATCH;
+
+    TensorStatus status = tensor_make_unique(out);
+    if (status != TENSOR_OK)
+        return status;
+
+    int ndim = src->ndim;
+    int src_strides[TENSOR_MAX_DIM];
+    util_get_effective_strides(src, src_strides);
+    int out_strides[TENSOR_MAX_DIM];
+    util_get_effective_strides(out, out_strides);
+
+    // ---------- 情况1：对所有轴滚动（展平处理） ----------
+    if (axes == NULL)
+    {
+        // 要求 num_axes == 1，即一个 shift 作用于所有轴
+        if (num_axes != 1)
+            return TENSOR_ERR_INVALID_PARAM;
+        int shift = shifts[0];
+        size_t n = src->size;
+        if (n == 0)
+            return TENSOR_OK;
+
+        // 将 src 按线性顺序复制到临时数组
+        float *tmp = (float *)malloc(n * sizeof(float));
+        if (!tmp)
+            return TENSOR_ERR_MEMORY;
+
+        int coords[TENSOR_MAX_DIM] = {0};
+        for (size_t i = 0; i < n; ++i)
+        {
+            ptrdiff_t off = util_offset_from_coords(coords, src_strides, ndim);
+            tmp[i] = src->data[off];
+            if (util_increment_coords(coords, src->dims, ndim))
+                break;
+        }
+
+        // 滚动一维数组
+        roll_1d(tmp, n, shift);
+
+        // 写回 out
+        memset(coords, 0, ndim * sizeof(int));
+        for (size_t i = 0; i < n; ++i)
+        {
+            ptrdiff_t off = util_offset_from_coords(coords, out_strides, ndim);
+            out->data[off] = tmp[i];
+            util_increment_coords(coords, out->dims, ndim);
+        }
+        free(tmp);
+        return TENSOR_OK;
+    }
+
+    // ---------- 情况2：指定轴滚动 ----------
+    // 检查 axes 和 shifts 长度一致
+    if (num_axes != 0 && !axes)
+        return TENSOR_ERR_INVALID_PARAM; // 实际上前面已经处理了 axes==NULL 的情况，这里不会执行到
+
+    // 归一化轴并收集 shift 映射
+    int shift_per_axis[TENSOR_MAX_DIM] = {0};
+    int axis_handled[TENSOR_MAX_DIM] = {0};
+    for (int i = 0; i < num_axes; ++i)
+    {
+        int ax = util_normalize_axis(axes[i], ndim);
+        if (ax < 0 || axis_handled[ax])
+            return TENSOR_ERR_INVALID_PARAM;
+        axis_handled[ax] = 1;
+        shift_per_axis[ax] = shifts[i];
+    }
+
+    // 遍历输出坐标，计算源坐标
+    int out_coords[TENSOR_MAX_DIM] = {0};
+    while (1)
+    {
+        // 计算源坐标：out_coords[ax] -> (out_coords[ax] - shift) mod dim
+        int src_coords[TENSOR_MAX_DIM];
+        for (int i = 0; i < ndim; ++i)
+        {
+            if (axis_handled[i])
+            {
+                int dim = src->dims[i];
+                int s = shift_per_axis[i];
+                int coord = out_coords[i] - s;
+                coord %= dim;
+                if (coord < 0)
+                    coord += dim;
+                src_coords[i] = coord;
+            }
+            else
+            {
+                src_coords[i] = out_coords[i];
+            }
+        }
+
+        ptrdiff_t src_off = util_offset_from_coords(src_coords, src_strides, ndim);
+        ptrdiff_t out_off = util_offset_from_coords(out_coords, out_strides, ndim);
+        out->data[out_off] = src->data[src_off];
+
+        if (util_increment_coords(out_coords, out->dims, ndim))
+            break;
+    }
+    return TENSOR_OK;
+}
+
+TensorStatus tensor_movedim(const Tensor *src, const int *src_axes, int num_axes,
+                            const int *dst_positions, Tensor *out)
+{
+    if (!src || !src_axes || !dst_positions || !out)
+        return TENSOR_ERR_NULL_PTR;
+    if (num_axes <= 0)
+        return TENSOR_ERR_INVALID_PARAM;
+
+    int ndim = src->ndim;
+    // 归一化并检查重复和范围
+    int used_src[TENSOR_MAX_DIM] = {0};
+    int used_dst[TENSOR_MAX_DIM] = {0};
+    int norm_src_axes[TENSOR_MAX_DIM];
+    int norm_dst_pos[TENSOR_MAX_DIM];
+    for (int i = 0; i < num_axes; ++i)
+    {
+        int ax = util_normalize_axis(src_axes[i], ndim);
+        if (ax < 0)
+            return TENSOR_ERR_INVALID_PARAM;
+        if (used_src[ax])
+            return TENSOR_ERR_INVALID_PARAM;
+        used_src[ax] = 1;
+        norm_src_axes[i] = ax;
+
+        int pos = util_normalize_axis(dst_positions[i], ndim);
+        if (pos < 0)
+            return TENSOR_ERR_INVALID_PARAM;
+        if (used_dst[pos])
+            return TENSOR_ERR_INVALID_PARAM;
+        used_dst[pos] = 1;
+        norm_dst_pos[i] = pos;
+    }
+
+    // 构建 perm 数组：perm[new_axis] = old_axis
+    int perm[TENSOR_MAX_DIM];
+    int remaining_axes[TENSOR_MAX_DIM];
+    int rem_count = 0;
+    for (int i = 0; i < ndim; ++i)
+    {
+        if (!used_src[i])
+            remaining_axes[rem_count++] = i;
+    }
+
+    int rem_idx = 0;
+    for (int new_ax = 0; new_ax < ndim; ++new_ax)
+    {
+        int found = -1;
+        for (int i = 0; i < num_axes; ++i)
+        {
+            if (norm_dst_pos[i] == new_ax)
+            {
+                found = norm_src_axes[i];
+                break;
+            }
+        }
+        if (found != -1)
+        {
+            perm[new_ax] = found;
+        }
+        else
+        {
+            perm[new_ax] = remaining_axes[rem_idx++];
+        }
+    }
+
+    // 计算新 dims 和 strides
+    int *new_dims = (int *)malloc(ndim * sizeof(int));
+    int *new_strides = (int *)malloc(ndim * sizeof(int));
+    if (!new_dims || !new_strides)
+    {
+        free(new_dims);
+        free(new_strides);
+        return TENSOR_ERR_MEMORY;
+    }
+
+    int src_strides[TENSOR_MAX_DIM];
+    util_get_effective_strides(src, src_strides);
+    for (int i = 0; i < ndim; ++i)
+    {
+        int old_ax = perm[i];
+        new_dims[i] = src->dims[old_ax];
+        new_strides[i] = src_strides[old_ax];
+    }
+
+    // 创建视图
+    Tensor *view = tensor_view(src, ndim, new_dims, new_strides);
+    free(new_dims);
+    free(new_strides);
+    if (!view)
+        return TENSOR_ERR_MEMORY;
+
+    *out = *view;
+    free(view);
     return TENSOR_OK;
 }
